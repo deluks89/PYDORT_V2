@@ -1,0 +1,5 @@
+2 ! number of wavelengths
+
+wavelength, n_real, n_imag
+400.0, 1.53, 0.016126739964345306
+400.0, 1.53, 0.016126739964345306

@@ -1,0 +1,16 @@
+! This configuration is not modified by the python wrapper
+! Any changes here are permanent!
+
+T                  ! Do_Expcoeffs     Expansion coefficient output
+T                  ! Do_Fmatrix       F-matrix output
+F                  ! Do_LinearRef     Flag linearizing w.r.t REF parameters
+F                  ! Do_LinearPSD     Flag linearizing w.r.t PSD parameters
+4, 4, 4            ! psd_indexes      Kind of distribution to use. 4 is lognormal.
+F, F, F            ! FixR1R2          Flag for fixing R1 & R2 internally (PSDs 1,2,3)
+20.0, 20.0, 20.0   ! R1R2_cutoff      Cutoff for fixing R1 & R2 internally (PSDs 1,2,3)
+10, 10, 10         ! nblocks          number of PSD quadrature blocks  (PSDs 1,2,3)
+20, 20, 20         ! nweights         number of PSD quadrature weights (PSDs 1,2,3)
+10000.0            ! xparticle_limit   Particle size limit
+181                ! n_Fmatrix_angles  number of F matrix angles for output
+
+

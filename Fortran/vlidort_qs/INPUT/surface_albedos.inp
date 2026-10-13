@@ -1,0 +1,4 @@
+1 ! n_rows
+1 ! n_cols
+Surface albedo for each wavelength
+1.000000000000000e-10

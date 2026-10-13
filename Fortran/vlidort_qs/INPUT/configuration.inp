@@ -1,0 +1,18 @@
+False	! Flag for performing only single scatter (FO) radiative transfer, no multiple scattering (MS)
+False	! Flag for performing a vector calculation
+True	! Flag for calculating the radiance at the desired viewing geometry
+False	! Flag for calculating actinic fluxes at observer altitude additionally.
+False	! Flag for calculating actinic flux profiles (disabled by the Python wrapper)
+True	! Flag for Rayleigh only. If true, only moment order 0 to 2 are considered for scattering phasefunction.
+False	! Flag for using deltaM Scaling (normally true with MS contributions and aerosols)
+4	! Number of discrete ordinate streams
+4	! Subdivision of layers for full-sphericity calculations
+15000.0	! Observer height [m]
+6371.0	! Planet radius [km]
+85.0	! Solar zenith angle
+89	! Viewing zenith angle
+90.0	! Relative azimuth angle
+True	! Flag for radiance jacobian calculations
+False	! Flag for actinic flux jacobian calculation
+vlidort_qs	! Resolved radiative-transfer backend mode
+4	! Resolved sphericity interpolation points for Standard/AC corrections
