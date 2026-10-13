@@ -1,0 +1,29 @@
+C:\Users\Jan-LukasTirpitz\anaconda3\Lib\site-packages\pandas\core\arrays\masked.py:61: UserWarning: Pandas requires version '1.3.6' or newer of 'bottleneck' (version '1.3.5' currently installed).
+  from pandas.core import (
+ Simulating wavelength            1  of            1 :    477.000000000000000000000000000000000        nm
+{'altitude_m': 100, 'sza_deg': 60, 'vza_deg': 89, 'correction': 1, 'single_scattering_only': False, 'streams': 8, 'fine_layers': 6, 'vector': False, 'radiance': 0.0644214657415283, 'o4_scd': 1.574696791689646e+44, 'original_fo': 0.04450556498891897, 'original_ms': 0.019915900752609315, 'original_total': 0.0644214657415283, 'corrected_fo': 0.04450556498891897, 'corrected_ms': 0.019915900752609315, 'corrected_total': 0.0644214657415283}
+ Simulating wavelength            1  of            1 :    477.000000000000000000000000000000000        nm
+{'altitude_m': 100, 'sza_deg': 60, 'vza_deg': 89, 'correction': 2, 'single_scattering_only': False, 'streams': 8, 'fine_layers': 6, 'vector': False, 'radiance': 0.07158444463448518, 'o4_scd': 1.653961764252929e+44, 'original_fo': 0.0445297012330244, 'original_ms': 0.01992842271795896, 'original_total': 0.06445812395098337, 'corrected_fo': 0.044504735903755546, 'corrected_ms': 0.027079708730729634, 'corrected_total': 0.07158444463448518}
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG IEEE_DENORMAL
+
+ Simulating wavelength            1  of            1 :    477.00000000000000       nm
+   Simulations for radiance:
+     Calling linearized VQS master.
+       Radiance total:   6.4432649202391112E-002
+       Radiance first order:   4.4505564988950023E-002
+       Radiance multiple scattering:   1.9927084213441096E-002
+  
+ Execution successful!
+{'altitude_m': 100, 'sza_deg': 60, 'vza_deg': 89, 'correction': 4, 'single_scattering_only': False, 'streams': 8, 'fine_layers': 6, 'vector': False, 'radiance': 0.06443264920239111, 'o4_scd': 1.553126195545237e+44}
+ Simulating wavelength            1  of            1 :    477.000000000000000000000000000000000        nm
+{'altitude_m': 100, 'sza_deg': 60, 'vza_deg': 89, 'correction': 1, 'single_scattering_only': True, 'streams': 8, 'fine_layers': 6, 'vector': False, 'radiance': 0.04450556498891897, 'o4_scd': 1.4108601820751391e+44}
+
+ Simulating wavelength            1  of            1 :    477.00000000000000       nm
+   Simulations for radiance:
+     Calling linearized VQS master.
+       Radiance total:   4.4505564988950023E-002
+       Radiance first order:   4.4505564988950023E-002
+       Radiance multiple scattering:   0.0000000000000000     
+  
+ Execution successful!
+{'altitude_m': 100, 'sza_deg': 60, 'vza_deg': 89, 'correction': 4, 'single_scattering_only': True, 'streams': 8, 'fine_layers': 6, 'vector': False, 'radiance': 0.044505564988950023, 'o4_scd': 1.4108601820750787e+44}

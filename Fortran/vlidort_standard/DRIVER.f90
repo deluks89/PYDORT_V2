@@ -1,5 +1,6 @@
 program DRIVER
 
+   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
    use VLIDORT_PARS_m, only : fpk, MAXLAYERS, MAXMOMENTS_INPUT, MAX_ATMOSWFS, &
       MAXSTOKES, MAX_DIRECTIONS, MAX_MESSAGES, MAX_SURFACEWFS, VLIDORT_SUCCESS, &
       ZERO, ONE, PI4, UPIDX, DNIDX
@@ -76,6 +77,7 @@ program DRIVER
    real(kind=fpk) :: d_extmul_d_p, d_ssa_d_p
    real(kind=fpk) :: d_moms_d_p(0:MAXMOMENTS_INPUT, 16)
    real(kind=fpk) :: observer_level, obs_height_clamped
+   real(kind=fpk) :: solver_vza
    real(kind=fpk) :: radiance_stokes(4), corrected_stokes(4), scratch1(4), scratch2(4), scratch3(4)
    real(kind=fpk) :: profilewf_stokes(MAX_ATMOSWFS, MAXLAYERS)
    integer :: aerosol_model_jacobians_aertype_indexes(MAX_ATMOSWFS)
@@ -108,6 +110,11 @@ program DRIVER
       relative_azimuth_angle, do_radiance_jacobians, do_actinic_flux_jacobians, &
       backend_mode, sphercorr_points)
    call decode_backend_mode(backend_mode, do_sphericity_correction, do_aircraft_correction)
+   solver_vza = min(viewing_zenith_angle, 180.0_fpk - viewing_zenith_angle)
+   if (do_ss_only) then
+      do_sphericity_correction = .false.
+      do_aircraft_correction = .false.
+   endif
 
    if (n_stokes == 1) then
       n_nonzero_greekmat_entries = 1
@@ -263,6 +270,11 @@ program DRIVER
          layer_scattering_od = rayleigh_layer_od + aer_agg_layer_scattering_od
          if (layer_extinction_od <= ZERO) layer_extinction_od = 1.0d-12
          layer_ssa = layer_scattering_od / layer_extinction_od
+         if (.not. ieee_is_finite(layer_ssa) .or. .not. ieee_is_finite(layer_extinction_od) .or. &
+             layer_ssa < ZERO .or. layer_ssa > ONE + 1.0d-12) then
+            write(*,*) 'Invalid optical properties at wavelength/layer:', w, n, layer_extinction_od, layer_ssa
+            stop 7
+         endif
 
          layer_greekmat = ZERO
          if (layer_scattering_od > ZERO) then
@@ -350,11 +362,19 @@ program DRIVER
       if (do_calculate_radiance) then
          if (do_radiance_jacobians) then
             call run_vlidort_jacobians_for_geometry(.true., radiance_stokes, profilewf_stokes)
+            if (.not. all(ieee_is_finite(profilewf_stokes(1:n_jacobians,1:n_layers)))) then
+               write(*,*) 'Nonfinite native radiance Jacobian.'
+               stop 7
+            endif
             do q = 1, n_jacobians
                write(30+q,*) profilewf_stokes(q,1:n_layers)
             enddo
          else
             call run_vlidort_for_geometry(.true., radiance_stokes)
+         endif
+         if (.not. all(ieee_is_finite(radiance_stokes(1:n_stokes)))) then
+            write(*,*) 'Nonfinite radiance; check geometry and optical properties.'
+            stop 7
          endif
          write(20,*) radiance_stokes(1)
       endif
@@ -389,7 +409,7 @@ contains
    subroutine initialize_vlidort_inputs()
       integer :: n
 
-      VLIDORT_FixIn%Bool%TS_DO_FULLRAD_MODE = .true.
+      VLIDORT_FixIn%Bool%TS_DO_FULLRAD_MODE = .not. do_ss_only
       VLIDORT_FixIn%Bool%TS_DO_THERMAL_EMISSION = .false.
       VLIDORT_FixIn%Bool%TS_DO_SURFACE_EMISSION = .false.
       VLIDORT_FixIn%Bool%TS_DO_PLANE_PARALLEL = .not. do_sphericity_correction
@@ -412,7 +432,8 @@ contains
       VLIDORT_FixIn%Bool%TS_DO_PLANETARY_PROBLEM = .false.
       VLIDORT_FixIn%Bool%TS_DO_SPHERICITY_CORRECTION = do_sphericity_correction
       VLIDORT_FixIn%Bool%TS_DO_MSSTS = .true.
-      VLIDORT_FixIn%Bool%TS_DO_FOURIER0_NSTOKES2 = .false.
+      ! The supplier uses the reduced I/Q system for the azimuth-independent mode.
+      VLIDORT_FixIn%Bool%TS_DO_FOURIER0_NSTOKES2 = (n_stokes > 1)
 
       VLIDORT_FixIn%Cont%TS_TAYLOR_ORDER = 2
       VLIDORT_FixIn%Cont%TS_NSTOKES = n_stokes
@@ -421,7 +442,9 @@ contains
       VLIDORT_FixIn%Cont%TS_NFINELAYERS = n_fine_layers
       VLIDORT_FixIn%Cont%TS_N_THERMAL_COEFFS = 2
       VLIDORT_FixIn%Cont%TS_VLIDORT_ACCURACY = 1.0d-6
-      VLIDORT_FixIn%Cont%TS_ASYMTX_TOLERANCE = 1.0d-12
+      ! Near-conservative vector Jacobians need tightly converged eigenvectors
+      ! as well as the binary128 arithmetic selected by the gfortran build.
+      VLIDORT_FixIn%Cont%TS_ASYMTX_TOLERANCE = 1.0d-28
       VLIDORT_FixIn%Cont%TS_NLAYERS_NOMS = n_layers
       VLIDORT_FixIn%Cont%TS_NLAYERS_CUTOFF = n_layers
       VLIDORT_FixIn%Cont%TS_TF_MAXITER = 0
@@ -489,7 +512,8 @@ contains
       VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,3) = relative_azimuth_angle
       VLIDORT_ModIn%MUserVal%TS_N_USER_DOUBLETS = 0
       VLIDORT_ModIn%MUserVal%TS_GEOMETRY_SPECHEIGHT = ZERO
-      obs_height_clamped = min(max(real(observer_height,kind=fpk), ZERO), layer_boundary_altitudes(0) - 1.0d-6)
+      obs_height_clamped = min(max(real(observer_height,kind=fpk), layer_boundary_altitudes(n_layers)), &
+         layer_boundary_altitudes(0))
       observer_level = height_to_user_level(obs_height_clamped)
       VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = observer_level
       VLIDORT_ModIn%MChapman%TS_EARTH_RADIUS = planet_radius
@@ -545,14 +569,20 @@ contains
       if (do_sphericity_correction .and. for_radiance) then
          if (do_aircraft_correction) then
             call AC_SPHERICITY_CORRECTION_MASTER(.false., VLIDORT_FixIn, VLIDORT_ModIn, VLIDORT_Sup, &
-               scratch1, scratch2, scratch3, radiance_stokes, corrected_stokes, stokes_out, &
+               scratch1, scratch2, scratch3, lps_stokes_d, corrected_stokes, stokes_out, &
                VLIDORT_Out, twilight_flag, fail, main_message, local_message, local_action)
          else
             call SPHERICITY_CORRECTION_MASTER(.false., VLIDORT_FixIn, VLIDORT_ModIn, VLIDORT_Sup, &
-               scratch1, scratch2, scratch3, VLIDORT_Out, radiance_stokes, stokes_out, &
+               scratch1, scratch2, scratch3, VLIDORT_Out, lps_stokes_d, stokes_out, &
                twilight_flag, fail, main_message, local_message, local_action)
          endif
       else
+         if (for_radiance) call prepare_standard_first_order(.false.)
+         if (for_radiance .and. do_ss_only) then
+            stokes_out = VLIDORT_Sup%SS%TS_STOKES_SS(1,1,:,output_diridx)
+            if (output_diridx == UPIDX) stokes_out = stokes_out + VLIDORT_Sup%SS%TS_STOKES_DB(1,1,:)
+            return
+         endif
          call VLIDORT_MASTER(.false., VLIDORT_FixIn, VLIDORT_ModIn, VLIDORT_Sup, VLIDORT_Out)
          stokes_out(1:MAXSTOKES) = VLIDORT_Out%Main%TS_STOKES(1,1,1:MAXSTOKES,output_diridx)
       endif
@@ -574,6 +604,7 @@ contains
          write(*,*) trim(VLIDORT_Out%Status%TS_TRACE_1)
          stop 5
       endif
+      if (for_radiance) call write_rt_diagnostics(.false., stokes_out)
    end subroutine run_vlidort_for_geometry
 
    subroutine run_vlidort_jacobians_for_geometry(for_radiance, stokes_out, profilewf_out)
@@ -613,6 +644,18 @@ contains
             profilewf_out(1:n_jacobians,1:n_layers) = lps_profile_e(1:n_jacobians,1:n_layers,1)
          endif
       else
+         if (for_radiance) call prepare_standard_first_order(.true.)
+         if (for_radiance .and. do_ss_only) then
+            stokes_out = VLIDORT_Sup%SS%TS_STOKES_SS(1,1,:,output_diridx)
+            profilewf_out(1:n_jacobians,1:n_layers) = &
+               VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_SS(1:n_jacobians,1:n_layers,1,1,1,output_diridx)
+            if (output_diridx == UPIDX) then
+               stokes_out = stokes_out + VLIDORT_Sup%SS%TS_STOKES_DB(1,1,:)
+               profilewf_out(1:n_jacobians,1:n_layers) = profilewf_out(1:n_jacobians,1:n_layers) + &
+                  VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_DB(1:n_jacobians,1:n_layers,1,1,1)
+            endif
+            return
+         endif
          call VLIDORT_LPS_MASTER(.false., VLIDORT_FixIn, VLIDORT_ModIn, VLIDORT_Sup, VLIDORT_Out, &
             VLIDORT_LinFixIn, VLIDORT_LinModIn, VLIDORT_LinSup, VLIDORT_LinOut)
          stokes_out(1:MAXSTOKES) = VLIDORT_Out%Main%TS_STOKES(1,1,1:MAXSTOKES,output_diridx)
@@ -637,12 +680,200 @@ contains
          write(*,*) trim(VLIDORT_Out%Status%TS_TRACE_1)
          stop 5
       endif
+      if (for_radiance) call write_rt_diagnostics(.true., stokes_out)
    end subroutine run_vlidort_jacobians_for_geometry
+
+   subroutine write_rt_diagnostics(linearized, stokes)
+      logical, intent(in) :: linearized
+      real(kind=fpk), intent(in) :: stokes(4)
+      character(len=8) :: enabled
+      integer :: unit, layer, status
+      real(kind=fpk) :: fo, ms, components(6)
+
+      call get_environment_variable('PYDORT_RT_DIAGNOSTICS', enabled, status=status)
+      if (status /= 0 .or. trim(enabled) /= '1') return
+      if (do_aircraft_correction) then
+         if (linearized) then
+            components = (/lps_stokes_a(1), lps_stokes_b(1), lps_stokes_c(1), &
+                           lps_stokes_d(1), lps_stokes_e(1), lps_stokes_f(1)/)
+         else
+            components = (/scratch1(1), scratch2(1), scratch3(1), &
+                           lps_stokes_d(1), corrected_stokes(1), stokes(1)/)
+         endif
+      else
+         fo = VLIDORT_Sup%SS%TS_STOKES_SS(1,1,1,output_diridx)
+         if (output_diridx == UPIDX) fo = fo + VLIDORT_Sup%SS%TS_STOKES_DB(1,1,1)
+         ms = stokes(1) - fo
+         components = (/fo, ms, stokes(1), fo, ms, stokes(1)/)
+      endif
+      open(newunit=unit, file='OUTPUT/rt_components.out', status='replace')
+      write(unit,*) '# original_FO original_MS original_total corrected_FO corrected_MS corrected_total'
+      write(unit,*) components
+      close(unit)
+      if (.not. do_aircraft_correction) return
+      open(newunit=unit, file='OUTPUT/rt_layers.out', status='replace')
+      write(unit,*) '# layer z_top_m z_bottom_m tau mu_top mu_bottom trans_boa MS_boa MS_ac MS_toa'
+      do layer = 1, n_layers
+         write(unit,*) layer, layer_boundary_altitudes(layer-1), layer_boundary_altitudes(layer), &
+            VLIDORT_FixIn%Optical%TS_DELTAU_VERT_INPUT(layer), &
+            cos(VLIDORT_Out%Main%TS_PATHGEOMS(2,layer-1)), cos(VLIDORT_Out%Main%TS_PATHGEOMS(2,layer)), &
+            VLIDORT_Out%Main%TS_LOSTRANS(1,layer), VLIDORT_Out%Main%TS_LAYER_MSSTS(1:3,1,layer)
+      enddo
+      close(unit)
+      if (linearized) then
+         open(newunit=unit, file='OUTPUT/rt_profile_components.out', status='replace')
+         write(unit,*) '# layer dFO_dtau_abs dMS_dtau_abs dtotal_dtau_abs'
+         do layer = 1, n_layers
+            write(unit,*) layer, lps_profile_d(1,layer,1), lps_profile_e(1,layer,1), lps_profile_f(1,layer,1)
+         enddo
+         close(unit)
+      endif
+      call sample_ac_sources()
+   end subroutine write_rt_diagnostics
+
+   subroutine sample_ac_sources()
+      type(VLIDORT_Fixed_Inputs) :: sample_fix
+      type(VLIDORT_Modified_Inputs) :: sample_mod
+      type(VLIDORT_Sup_InOut) :: sample_sup
+      type(VLIDORT_Outputs) :: sample_out
+      character(len=8) :: enabled
+      integer :: status, unit, layer, first_layer, last_layer
+      real(kind=fpk) :: radius, boa, altitude, height, theta, alpha, phi, scattering
+      real(kind=fpk) :: theta_boa, alpha_boa, phi_boa, theta_local, alpha_local, phi_local
+
+      call get_environment_variable('PYDORT_RT_SAMPLE_SOURCES', enabled, status=status)
+      if (status /= 0 .or. trim(enabled) /= '1') return
+      sample_fix = VLIDORT_FixIn
+      sample_mod = VLIDORT_ModIn
+      sample_sup = VLIDORT_Sup
+      first_layer = 1; last_layer = nint(observer_level)
+      if (output_diridx == UPIDX) then
+         first_layer = nint(observer_level) + 1; last_layer = n_layers
+      endif
+      open(newunit=unit, file='OUTPUT/rt_sampled_sources.out', status='replace')
+      write(unit,*) '# layer local_sza_deg local_vza_deg local_raa_deg directly_evaluated_MS'
+      do layer = first_layer, last_layer
+         radius = planet_radius
+         boa = layer_boundary_altitudes(n_layers) / 1000.0_fpk
+         altitude = obs_height_clamped / 1000.0_fpk
+         height = 0.5_fpk * (layer_boundary_altitudes(layer-1) + layer_boundary_altitudes(layer)) / 1000.0_fpk
+         theta = solar_zenith_angle; alpha = solver_vza; phi = relative_azimuth_angle
+         if (output_diridx == DNIDX) then
+            call AC_to_BOATOA_geometry_conversion(radius, boa, altitude, height, theta, alpha, phi, &
+               scattering, theta_boa, alpha_boa, phi_boa, theta_local, alpha_local, phi_local)
+         else
+            call AC_to_BOA_geometry_conversion(radius, height, altitude, theta, alpha, phi, &
+               scattering, theta_local, alpha_local, phi_local)
+         endif
+         sample_mod%MSunrays%TS_SZANGLES(1) = theta_local
+         sample_mod%MUserVal%TS_USER_VZANGLES_INPUT(1) = alpha_local
+         sample_mod%MUserVal%TS_USER_RELAZMS(1) = phi_local
+         sample_mod%MUserVal%TS_USER_OBSGEOMS_INPUT(1,:) = (/theta_local, alpha_local, phi_local/)
+         call VLIDORT_MASTER(.false., sample_fix, sample_mod, sample_sup, sample_out)
+         if (sample_out%Status%TS_STATUS_INPUTCHECK /= VLIDORT_SUCCESS .or. &
+             sample_out%Status%TS_STATUS_CALCULATION /= VLIDORT_SUCCESS) then
+            write(*,*) 'Diagnostic source sampling failed at layer', layer
+            stop 8
+         endif
+         write(unit,*) layer, theta_local, alpha_local, phi_local, sample_out%Main%TS_LAYER_MSSTS(1,1,layer)
+      enddo
+      close(unit)
+   end subroutine sample_ac_sources
+
+   subroutine prepare_standard_first_order(linearized)
+      logical, intent(in) :: linearized
+      type(VLIDORT_Fixed_Inputs) :: fo_fix
+      type(VLIDORT_Modified_Inputs) :: fo_mod
+      type(VLIDORT_Modified_LinInputs) :: fo_linmod
+      integer :: bottom
+      real(kind=fpk) :: fraction, radius, boa, altitude, theta, alpha, phi
+      real(kind=fpk) :: cosscat, theta_boa, alpha_boa, phi_boa
+
+      ! MS uses the observer's local geometry. Its spherical FO supplement
+      ! must use that same ray, not the same numeric angle at the surface.
+      fo_fix = VLIDORT_FixIn
+      fo_mod = VLIDORT_ModIn
+      fo_linmod = VLIDORT_LinModIn
+      fo_fix%Bool%TS_DO_FULLRAD_MODE = .false.
+      fo_fix%Bool%TS_DO_PLANE_PARALLEL = .false.
+      fo_fix%Bool%TS_DO_SPHERICITY_CORRECTION = .false.
+      fo_fix%Bool%TS_DO_MSSTS = .false.
+      fo_mod%MBool%TS_DO_FOCORR_EXTERNAL = .false.
+
+      if (viewing_zenith_angle <= 90.0_fpk) then
+         bottom = ceiling(observer_level)
+         if (bottom == 0) then
+            VLIDORT_Sup%SS%TS_STOKES_SS = ZERO
+            VLIDORT_Sup%SS%TS_STOKES_DB = ZERO
+            call VLIDORT_LinSup_Init(VLIDORT_LinSup)
+            VLIDORT_ModIn%MBool%TS_DO_FOCORR_EXTERNAL = .true.
+            VLIDORT_ModIn%MBool%TS_DO_FOCORR_OUTGOING = .false.
+            return
+         endif
+         fraction = observer_level - real(bottom-1,kind=fpk)
+         fo_fix%Cont%TS_NLAYERS = bottom
+         fo_fix%Cont%TS_NLAYERS_NOMS = bottom
+         fo_fix%Cont%TS_NLAYERS_CUTOFF = bottom
+         fo_fix%Chapman%TS_HEIGHT_GRID(bottom) = obs_height_clamped / 1000.0_fpk
+         fo_fix%Optical%TS_DELTAU_VERT_INPUT(bottom) = &
+            fraction * fo_fix%Optical%TS_DELTAU_VERT_INPUT(bottom)
+         ! Fractional optical derivatives retain the original layer's
+         ! normalization, so the result is still dI/d(original layer OD).
+         fo_mod%MUserVal%TS_USER_LEVELS(1) = real(bottom,kind=fpk)
+         fo_mod%MUserVal%TS_GEOMETRY_SPECHEIGHT = fo_fix%Chapman%TS_HEIGHT_GRID(bottom)
+      else
+         radius = planet_radius
+         boa = layer_boundary_altitudes(n_layers) / 1000.0_fpk
+         altitude = obs_height_clamped / 1000.0_fpk
+         theta = solar_zenith_angle; alpha = solver_vza; phi = relative_azimuth_angle
+         if ((radius+altitude)*sin(alpha*acos(-ONE)/180.0_fpk) >= radius+boa) then
+            write(*,*) 'Standard spherical FO: limb ray misses surface; use VLIDORT-QS.'
+            stop 6
+         endif
+         call AC_to_BOA_geometry_conversion(radius, boa, altitude, theta, alpha, phi, &
+            cosscat, theta_boa, alpha_boa, phi_boa)
+         fo_mod%MSunrays%TS_SZANGLES(1) = theta_boa
+         fo_mod%MUserVal%TS_USER_VZANGLES_INPUT(1) = alpha_boa
+         fo_mod%MUserVal%TS_USER_RELAZMS(1) = phi_boa
+         fo_mod%MUserVal%TS_USER_OBSGEOMS_INPUT(1,:) = (/theta_boa, alpha_boa, phi_boa/)
+      endif
+
+      if (linearized) then
+         call VLIDORT_LPS_MASTER(.false., fo_fix, fo_mod, VLIDORT_Sup, VLIDORT_Out, &
+            VLIDORT_LinFixIn, fo_linmod, VLIDORT_LinSup, VLIDORT_LinOut)
+      else
+         call VLIDORT_MASTER(.false., fo_fix, fo_mod, VLIDORT_Sup, VLIDORT_Out)
+      endif
+      if (VLIDORT_Out%Status%TS_STATUS_INPUTCHECK /= VLIDORT_SUCCESS .or. &
+          VLIDORT_Out%Status%TS_STATUS_CALCULATION /= VLIDORT_SUCCESS) then
+         write(*,*) 'Observer-referenced spherical first-order calculation failed.'
+         write(*,*) trim(VLIDORT_Out%Status%TS_CHECKMESSAGES(1))
+         write(*,*) trim(VLIDORT_Out%Status%TS_MESSAGE)
+         stop 6
+      endif
+      VLIDORT_ModIn%MBool%TS_DO_FOCORR_EXTERNAL = .true.
+      ! The spherical FO is already in the supplement; do not recompute it.
+      VLIDORT_ModIn%MBool%TS_DO_FOCORR_OUTGOING = .false.
+   end subroutine prepare_standard_first_order
 
    subroutine configure_radiance_geometry(diridx)
       integer, intent(out) :: diridx
 
       call reset_single_geometry()
+      VLIDORT_FixIn%Bool%TS_DO_SPHERICITY_CORRECTION = do_sphericity_correction
+      VLIDORT_FixIn%Bool%TS_DO_MSSTS = do_sphericity_correction
+      if (do_aircraft_correction) then
+         if (observer_level <= ZERO .or. observer_level >= real(n_layers,kind=fpk) .or. &
+             abs(observer_level-real(nint(observer_level),kind=fpk)) > 1.0d-8) then
+            write(*,*) 'Aircraft correction requires an interior layer boundary; use VLIDORT-QS.'
+            stop 6
+         endif
+         if ((planet_radius+obs_height_clamped/1000.0_fpk)*sin(solver_vza*acos(-ONE)/180.0_fpk) &
+             >= planet_radius+layer_boundary_altitudes(n_layers)/1000.0_fpk) then
+            write(*,*) 'Aircraft correction ray misses the surface; use VLIDORT-QS.'
+            stop 6
+         endif
+      endif
       if (viewing_zenith_angle <= 90.0_fpk) then
          VLIDORT_FixIn%Bool%TS_DO_UPWELLING = .false.
          VLIDORT_FixIn%Bool%TS_DO_DNWELLING = .true.
@@ -650,7 +881,7 @@ contains
          if (do_sphericity_correction) then
             if (do_aircraft_correction) then
                VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = &
-                  real(max(1, min(n_layers - 1, nint(observer_level))), kind=fpk)
+                  real(nint(observer_level), kind=fpk)
             else
                VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = real(n_layers, kind=fpk)
             endif
@@ -662,7 +893,7 @@ contains
          if (do_sphericity_correction) then
             if (do_aircraft_correction) then
                VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = &
-                  real(max(1, min(n_layers - 1, nint(observer_level))), kind=fpk)
+                  real(nint(observer_level), kind=fpk)
             else
                VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = ZERO
             endif
@@ -674,6 +905,9 @@ contains
       integer, intent(out) :: diridx
 
       call reset_single_geometry()
+      ! LOS interpolation applies to radiances, not angularly integrated fluxes.
+      VLIDORT_FixIn%Bool%TS_DO_SPHERICITY_CORRECTION = .false.
+      VLIDORT_FixIn%Bool%TS_DO_MSSTS = .false.
       VLIDORT_FixIn%Bool%TS_DO_UPWELLING = .true.
       VLIDORT_FixIn%Bool%TS_DO_DNWELLING = .true.
       VLIDORT_ModIn%MUserVal%TS_USER_LEVELS(1) = observer_level
@@ -681,6 +915,8 @@ contains
    end subroutine configure_flux_geometry
 
    subroutine reset_single_geometry()
+      VLIDORT_ModIn%MBool%TS_DO_FOCORR_EXTERNAL = .false.
+      VLIDORT_ModIn%MBool%TS_DO_FOCORR_OUTGOING = .true.
       VLIDORT_ModIn%MSunrays%TS_N_SZANGLES = 1
       VLIDORT_ModIn%MSunrays%TS_SZANGLES = ZERO
       VLIDORT_ModIn%MSunrays%TS_SZANGLES(1) = solar_zenith_angle
@@ -689,11 +925,11 @@ contains
       VLIDORT_ModIn%MUserVal%TS_USER_RELAZMS(1) = relative_azimuth_angle
       VLIDORT_ModIn%MUserVal%TS_N_USER_VZANGLES = 1
       VLIDORT_ModIn%MUserVal%TS_USER_VZANGLES_INPUT = ZERO
-      VLIDORT_ModIn%MUserVal%TS_USER_VZANGLES_INPUT(1) = viewing_zenith_angle
+      VLIDORT_ModIn%MUserVal%TS_USER_VZANGLES_INPUT(1) = solver_vza
       VLIDORT_ModIn%MUserVal%TS_N_USER_OBSGEOMS = 1
       VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT = ZERO
       VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,1) = solar_zenith_angle
-      VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,2) = viewing_zenith_angle
+      VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,2) = solver_vza
       VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,3) = relative_azimuth_angle
       VLIDORT_ModIn%MUserVal%TS_N_USER_DOUBLETS = 0
       VLIDORT_ModIn%MUserVal%TS_USER_LEVELS = ZERO

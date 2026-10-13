@@ -726,7 +726,8 @@ subroutine MS2pt_AC_LCS_SPHERCORR_V1 ( do_debug_input, &
             TRANS = VLIDORT_Out%Main%TS_LOSTRANS(1,N)
             CUMSOURCE(N,1:NS) = TRANS * CUMSOURCE(N-1,1:NS) + AMSST(N,1:NS) 
          ENDDO
-         CORRECTED_MS_STOKES(1:NS) = CUMSOURCE(NLAYERS,1:NS)
+!  The recursion ends at the aircraft, not at NLAYERS (which is uncomputed).
+         CORRECTED_MS_STOKES(1:NS) = CUMSOURCE(ACLEVEL,1:NS)
          IF ( DO_COLUMN_LINEARIZATION ) THEN
            DO Q = 1, NCWF
              LC_CUMSOURCE(Q,1:NS) = ZERO

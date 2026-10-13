@@ -1,0 +1,3 @@
+correction	backend	fallback_reason	sza_deg	altitude_m	vza_deg	vector	layers	background_layer_od	radiance	radiance_without_jacobians	o4_scd	seconds	derivatives_passed
+1	standard		60	100	89	True	7	1e-05	0.06344642958595254	0.06344642958595254	1.5440758584548368e+44	0.5385091998614371	True
+2	aircraft_spherical		60	100	89	True	7	1e-05	0.06624147860609496	0.06624147860609496	1.5890178020533499e+44	0.5885861997958273	True

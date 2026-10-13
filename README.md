@@ -21,8 +21,8 @@ wrapper. The original source folders are intentionally left untouched:
 
 The Python wrapper exposes one public spherical-correction setting:
 
-- `pyd.settings_rt.sphericity_correction = 1`: Standard VLIDORT without
-  spherical correction.
+- `pyd.settings_rt.sphericity_correction = 1`: Standard VLIDORT with spherical
+  first-order scattering, but without the multiple-scattering spherical correction.
 - `pyd.settings_rt.sphericity_correction = 2`: 2-point interpolated correction;
   Standard VLIDORT at or above the top of the altitude grid, VLIDORT-AC below it.
 - `pyd.settings_rt.sphericity_correction = 3`: 3-point interpolated correction
@@ -32,6 +32,14 @@ The Python wrapper exposes one public spherical-correction setting:
   correction.
 
 Use `pyd.run_rt()` as the backend-dispatching entry point.
+
+Aircraft 2-point calculations require an observer on an interior layer boundary
+and a ray that can be extended to the surface. Unsupported geometries fall back
+to QS with a warning, rather than silently rounding the observer height or
+returning NaNs. At VZA 89 degrees on Earth, the surface-intersection limit is
+approximately 970 m. The comparison tables record the resolved backend and
+`fallback_reason`; these rows are QS results, not aircraft interpolation results.
+Surface-missing, downward-looking limb rays also require QS for spherical FO.
 
 ## Build
 
@@ -43,7 +51,38 @@ mingw32-make
 ```
 
 The common makefile builds the QS driver, the Standard/AC driver, and the Mie
-model. Override the compiler with `FC=...` if needed.
+model. The validated Standard/AC build uses gfortran and binary128 arithmetic
+(`-freal-8-real-16`) throughout the driver, core, and bundled LAPACK routines.
+This prevents catastrophic cancellation in native LPS Jacobians near conservative
+scattering. The adapter also uses an ASYMTX tolerance of `1e-28`: `1e-20`
+still left errors in conservative polarized calculations. The existing native
+SSA limiter is unchanged; no background absorption is added, and the Jacobians
+are not replaced by finite differences. QS and Mie are unchanged.
+
+The makefile rebuilds all Standard/AC objects after changes to dimensions,
+type definitions, or the makefile. When overriding compiler flags on the command
+line, also use `-B`; mixing precision settings between objects is invalid.
+Other compiler configurations have not been validated for conservative Jacobians.
+
+## Jacobian regression
+
+```sh
+python Examples/testing/validate_native_jacobians.py
+python Examples/testing/validate_native_jacobians.py --suite
+python Examples/testing/validate_native_jacobians.py --suite --vector --output Examples/testing/native_jacobian_validation/vector_full_grid
+python Examples/testing/validate_rt_workflows.py
+```
+
+The Spyder-style validation script compares native absorption Jacobians with
+independent layer-OD perturbations and an O4-weighted perturbation, and checks
+that enabling Jacobians does not change the radiance. It uses temporary Fortran
+run directories and writes separate text tables under
+`Examples/testing/native_jacobian_validation/`. Existing comparison results are
+not overwritten. Finite differences are used only in this validation script.
+The public-API workflow check also exercises QS fallback, spherical first-order
+agreement with QS, and repeated wavelengths with both radiances and observer
+actinic fluxes enabled. These checks cover absorption Jacobians of Stokes I
+(including polarized RT), not every aerosol or surface Jacobian.
 
 ## Actinic flux output
 
@@ -51,6 +90,6 @@ The wrapper supports actinic fluxes at the observer altitude. Full vertical
 actinic-flux profiles have been removed from the Python API and are no longer
 requested from the copied QS backend.
 
-The copied Standard VLIDORT `vlidort_pars.f90` now sets `MAXLAYERS = 200` for
+The copied Standard VLIDORT `vlidort_pars.f90` sets `MAXLAYERS = 101` for
 the wrapper's default vertical grids and `MAX_USER_LEVELS = 1` for single-level
 output.

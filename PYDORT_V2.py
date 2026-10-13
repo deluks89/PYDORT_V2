@@ -909,10 +909,13 @@ class SettingsRT(FrozenContainer):
     
     sphericity_correction: int, default is 1.
         Selects the spherical-correction accuracy and the Fortran backend:
-        1 uses Standard VLIDORT without spherical correction, 2 uses the
+        1 uses Standard VLIDORT with spherical first-order scattering but
+        no multiple-scattering spherical correction, 2 uses the
         2-point interpolated correction, 3 uses the 3-point interpolated
         correction at/above TOA and VLIDORT-QS below TOA, and 4 or higher uses
-        VLIDORT-QS full spherical correction.
+        VLIDORT-QS full spherical correction. Unsupported aircraft geometries
+        (including rays whose extension misses the surface, and observers
+        between layer boundaries) fall back to QS with a warning.
     do_actinic_flux_at_observer: bool, default is False.
         Set to true if you require actinic fluxes at the exact observer altitude only.
     do_radiance: bool, default is True.
@@ -3286,7 +3289,30 @@ class Pydort(VerticalGrid):
         correction = int(self.settings_rt.sphericity_correction)
         observer_at_or_above_toa = self._observer_at_or_above_toa()
 
+        def qs_fallback(reason):
+            if warn:
+                warnings.warn(
+                    f'sphericity_correction={correction}: {reason}; '
+                    'using VLIDORT-QS full spherical correction instead.',
+                    RuntimeWarning, stacklevel=3,
+                )
+            return {
+                'model': RadiativeTransferModel.QS.value,
+                'backend_mode': RadiativeTransferModel.QS.value,
+                'sphericity_interpolation_points': 4,
+                'fallback_reason': reason,
+            }
+
+        height = float(self.viewing_geometry.observer_height_agl)
+        grid = np.asarray(self.vertical_grid, dtype=float)
+        radius = float(self.settings_rt.planet_radius) * 1000.0
+        vza = float(self.viewing_geometry.vza)
+        ray_radius = (radius + height) * np.sin(np.deg2rad(min(vza, 180.0-vza)))
+        misses_surface = ray_radius >= radius + grid[0]
+
         if correction == SphericityCorrection.NONE.value:
+            if self.settings_rt.do_radiance and vza > 90 and misses_surface:
+                return qs_fallback('the spherical first-order limb ray does not intersect the surface')
             return {
                 'model': RadiativeTransferModel.STANDARD.value,
                 'backend_mode': 'standard',
@@ -3300,6 +3326,11 @@ class Pydort(VerticalGrid):
                     'backend_mode': 'standard_spherical',
                     'sphericity_interpolation_points': 2,
                 }
+            if self.settings_rt.do_radiance:
+                if misses_surface:
+                    return qs_fallback('the aircraft 2-point ray cannot be extended to the surface')
+                if not np.any(np.isclose(grid[1:-1], height, rtol=0, atol=1e-6)):
+                    return qs_fallback('the aircraft 2-point observer must be on an interior layer boundary')
             return {
                 'model': RadiativeTransferModel.AIRCRAFT.value,
                 'backend_mode': 'aircraft_spherical',

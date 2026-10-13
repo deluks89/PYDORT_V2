@@ -1,6 +1,7 @@
 # Build for copied Standard VLIDORT 2.8.3 and VLIDORT-AC sources.
 
 FC = gfortran
+.DEFAULT_GOAL := all
 
 MOD_PATH = mod
 OBJ_PATH = obj
@@ -11,11 +12,14 @@ REG_PATH = vlidort_main/regular
 LIN_PATH = vlidort_main/linearized
 SUPPORT_PATH = ../driver_support
 
-FFLAGS = -c
+FFLAGS = -c -O2
 LDFLAGS =
 
 ifeq ($(FC), gfortran)
-	FFLAGS := $(FFLAGS) -Wall -fno-automatic -I$(MOD_PATH) -J$(MOD_PATH)
+	# Conservative Rayleigh LPS derivatives lose precision in binary64.
+	# Promote EVERY compilation unit, including the bundled LAPACK and driver,
+	# so all module interfaces use the same binary128 arithmetic.
+	FFLAGS := $(FFLAGS) -Wall -fno-automatic -freal-8-real-16 -I$(MOD_PATH) -J$(MOD_PATH)
 	LDFLAGS := $(LDFLAGS) -Wl,--stack,536870912
 endif
 
@@ -139,6 +143,10 @@ linearized: regular $(LINEARIZED_OBJECTS)
 
 driver: linearized $(DRIVER_OBJECTS)
 	$(FC) $(OBJ_FILES) $(LDFLAGS) -o DRIVER.exe
+
+# Dimension/type or build-option changes require a consistent full rebuild.
+# For command-line FFLAGS overrides, use -B as well.
+$(REGULAR_OBJECTS) $(LINEARIZED_OBJECTS) $(DRIVER_OBJECTS): makefile $(wildcard $(DEF_PATH)/*.f90) $(SUPPORT_PATH)/DRIVER_pars.f90
 
 $(MOD_PATH):
 	@if not exist "$(MOD_PATH)" mkdir "$(MOD_PATH)"

@@ -51,7 +51,7 @@ SPHERICITY_CASES = [
     {
         "label": "none",
         "sphericity_correction": 1,
-        "description": "Standard VLIDORT without spherical correction",
+        "description": "Standard VLIDORT with spherical FO but no MS spherical correction",
     },
     {
         "label": "aircraft_2point",
@@ -149,6 +149,7 @@ def append_success_rows(radiance_rows, o4_scd_rows, pyd, case, sza, altitude, ba
         "description": case["description"],
         "resolved_model": backend["model"],
         "resolved_backend_mode": backend["backend_mode"],
+        "fallback_reason": backend.get("fallback_reason", ""),
         "sphericity_interpolation_points": backend["sphericity_interpolation_points"],
         "sza_deg": sza,
         "saa_deg": SAA_DEG,

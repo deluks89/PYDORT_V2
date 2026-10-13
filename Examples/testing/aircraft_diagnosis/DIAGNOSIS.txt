@@ -1,0 +1,108 @@
+Aircraft two-point spherical correction diagnosis
+================================================
+
+Scope
+-----
+Nine valid aircraft geometries, with no QS fallback: pure Rayleigh at 477 nm,
+black surface, default 82-layer grid, scalar calculations, four half-space
+streams, four fine layers, SAA=0 and VAA=90 degrees. Native absorption
+Jacobians were used for O4 SCDs. QS is the comparison reference, not an
+assumed exact solution. Original user comparison files were not overwritten.
+
+Main finding
+------------
+For the shallow valid sightlines, the dominant radiance error enters through
+the AC two-point interpolation of layer-integrated multiple-scattering (MS)
+sources. It is not explained by incorrect spherical segment transmission or
+first-order scattering in the representative case.
+
+At observer height 100 m, SZA=60 degrees, VZA=89 degrees:
+
+                               Standard no MS SC      AC 2-point       QS
+First order                    0.04450556499          0.04450473590    0.04450556499
+Multiple scattering            0.01991409799          0.02707701867    0.01993174509
+Total radiance                 0.06441966298          0.07158175457    0.06443731008
+Total radiance error vs QS (%) -0.02739               +11.08743         0
+O4 SCD error vs QS (%)          +3.39289               +8.39640         0
+
+The AC MS term is 35.85% above QS. Its first-order term differs by only
+0.00186%. Independently reconstructed path cosines agree within 5.1e-15 and
+layer transmissions within 2.9e-14. Recombining the dumped endpoint sources,
+native interpolation weights and spherical transmissions reproduces the
+native AC MS result within 1.8e-17. Weights lie between 0 and 1: this is
+interpolation, not accidental extrapolation.
+
+Diagnostic intervention
+-----------------------
+At each layer midpoint, call the existing regular VLIDORT solver at the
+local SZA/VZA/relative azimuth of that same spherical ray. Extract its layer
+MS source instead of interpolating the observer/TOA endpoint sources.
+Accumulate these directly evaluated sources using exactly the same native
+spherical transmissions as AC. This is an offline diagnostic reconstruction,
+not an implemented or validated replacement backend.
+
+This gives MS=0.01992988564 and total radiance error -0.00417% relative to QS.
+It isolates the endpoint source approximation as the dominant problem in
+this case. See sampled/h100_sza60_vza89_c2_ss0/source_interpolation.png and
+source_analysis.txt for the layer contributions.
+
+Why this can happen
+-------------------
+AC linearly interpolates layer-integrated source contributions in cos(VZA),
+not an angle-independent local scattering emissivity. These contributions
+already contain the angular dependence of transport through a layer.
+For a thin layer with slowly varying emissivity, the path-length factor is
+approximately proportional to 1/cos(VZA). This is strongly curved near the
+horizon; a straight endpoint chord can overestimate intermediate values.
+The direct source evaluations confirm a large positive interpolation bias.
+This explanation is a physical interpretation of the measured bias, not a
+proof that 1/cos(VZA) alone accounts for every layer or geometry.
+The regular AC master was compared with the supplier reference using
+git diff --no-index; there were no content differences.
+
+Geometry validity only ensures that the required surface-referenced ray
+exists. It does not bound this interpolation error. At 100 m and VZA=70,
+SZA=60, AC does improve radiance error from 0.1861% to 0.0133%; at 15 km,
+VZA=85, SZA=60, it improves 2.3854% to 0.7119%. All six VZA=89 cases at
+100/500 m and SZA=0/60/85 instead have larger AC radiance errors (9.68-15.88%).
+Radiance improvement does not guarantee O4 SCD improvement: those depend
+on derivatives and photon-path weighting. No new FD Jacobian overwrite was
+introduced. The present experiment does not resolve every SCD discrepancy.
+
+Numerical checks
+----------------
+Doubling half-space streams from four to eight in the representative case
+changes AC radiance error from 11.0874% to 11.0996%, and Standard from
+-0.0274% to -0.0174%. The dominant radiance bias therefore persists.
+At eight streams, increasing fine layers from four to six changes total
+radiances by less than 5e-15 absolute. Eight fine layers were also attempted
+but rejected by the compiled MAXFINELAYERS=6 limit; no dimensions were changed.
+O4 SCD errors are more stream-sensitive: at eight streams they are +1.389%
+(Standard) and +6.492% (AC), versus +3.393% and +8.396% at four streams.
+Do not interpret these SCD comparisons as fully converged benchmarks.
+See convergence/ and fine6/ for the additional tables.
+
+Reproduction
+------------
+From C:/PYDORT_V2, after building the current Standard driver:
+python Examples/testing/diagnose_aircraft_sc.py --suite --output Examples/testing/aircraft_diagnosis/sweep
+python Examples/testing/diagnose_aircraft_sc.py --samples --output Examples/testing/aircraft_diagnosis/sampled
+python Examples/testing/analyze_aircraft_diagnosis.py Examples/testing/aircraft_diagnosis/sampled
+python Examples/testing/analyze_aircraft_diagnosis.py Examples/testing/aircraft_diagnosis/sweep
+
+Both scripts use Spyder cells. Simulations use temporary isolated backend
+directories. Output tables are components.txt, comparison.txt and
+geometry_checks.txt. Inputs and individual native output files are isolated
+from the user's usual working simulations (the diagnostic saves output
+copies, not full input snapshots).
+
+Driver instrumentation is opt-in via PYDORT_RT_DIAGNOSTICS=1; extra source
+sampling also requires PYDORT_RT_SAMPLE_SOURCES=1. The script sets/restores
+these environment variables. Dumps are designed for single-wavelength,
+Stokes-I, absorption-first-Jacobian diagnostics, not general output export.
+The analyzer assumes the default Earth radius, zero surface altitude,
+Rayleigh scattering and grid-boundary observer levels; layer reconstruction
+is currently implemented only for the downwelling cases.
+
+No production source interpolation, spherical first-order correction, SSA
+limiter or Jacobian algorithm was changed for this diagnosis.

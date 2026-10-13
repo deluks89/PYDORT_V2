@@ -1,0 +1,2 @@
+altitude_m	sza_deg	vza_deg	max_path_mu_error	max_transmittance_error	min_interpolation_weight	max_interpolation_weight	reconstructed_ac_ms	native_ac_ms	reconstructed_minus_native
+100.0	60.0	89.0	5.0306980803327406e-15	2.808864252301646e-14	0.020044828712683035	0.9966393300281162	0.027077018671086025	0.027077018671086008	1.734723475976807e-17

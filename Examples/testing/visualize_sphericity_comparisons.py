@@ -24,20 +24,26 @@ O4_SCD_FILE = RESULT_DIR / "limb_rayleigh_o4_scds.txt"
 FIG_ABSOLUTE = RESULT_DIR / "sphericity_absolute_values.png"
 FIG_RELATIVE = RESULT_DIR / "sphericity_relative_to_full_qs.png"
 
-CASE_ORDER = ["none", "aircraft_2point", "full_qs"]
+CASE_ORDER = ["none", "aircraft_2point", "aircraft_2point_qs_fallback", "none_qs_fallback", "full_qs"]
 CASE_LABELS = {
-    "none": "No correction",
+    "none": "Spherical FO, no MS correction",
     "aircraft_2point": "Aircraft 2-point",
+    "aircraft_2point_qs_fallback": "Aircraft request: QS fallback",
+    "none_qs_fallback": "Standard request: QS fallback",
     "full_qs": "Full QS",
 }
 CASE_COLORS = {
     "none": "C3",
     "aircraft_2point": "C0",
+    "aircraft_2point_qs_fallback": "C2",
+    "none_qs_fallback": "C4",
     "full_qs": "k",
 }
 CASE_MARKERS = {
     "none": "o",
     "aircraft_2point": "s",
+    "aircraft_2point_qs_fallback": "x",
+    "none_qs_fallback": "+",
     "full_qs": "^",
 }
 
@@ -60,6 +66,11 @@ def load_results():
 
     radiances = pd.read_csv(RADIANCE_FILE, sep="\t")
     o4_scds = pd.read_csv(O4_SCD_FILE, sep="\t")
+
+    for table in (radiances, o4_scds):
+        if "fallback_reason" in table:
+            fallback = table["fallback_reason"].fillna("").ne("")
+            table.loc[fallback, "case"] = table.loc[fallback, "case"] + "_qs_fallback"
 
     radiance_columns = [
         "radiance_photons_s_cm2_sr_nm",
