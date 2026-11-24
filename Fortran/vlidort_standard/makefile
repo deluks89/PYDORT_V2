@@ -13,8 +13,7 @@ LIN_PATH = vlidort_main/linearized
 SUPPORT_PATH = ../driver_support
 
 FFLAGS = -c -O2
-LDFLAGS =
-
+LDFLAGS = -static
 ifeq ($(FC), gfortran)
 	# Conservative Rayleigh LPS derivatives lose precision in binary64.
 	# Promote EVERY compilation unit, including the bundled LAPACK and driver,
@@ -128,6 +127,7 @@ DRIVER_SOURCES = \
 	$(SUPPORT_PATH)/MainDriverUtility.f90 \
 	$(SUPPORT_PATH)/ReadInputData.f90 \
 	$(SUPPORT_PATH)/RayleighScattering.f90 \
+	sparse_aircraft.f90 \
 	DRIVER.f90
 DRIVER_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(DRIVER_SOURCES)))
 MOD_FILES = $(MOD_PATH)/*.mod
@@ -171,6 +171,8 @@ $(OBJ_PATH)/%.o: $(SUPPORT_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 
 $(OBJ_PATH)/%.o: %.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
+
+$(OBJ_PATH)/DRIVER.o: $(OBJ_PATH)/sparse_aircraft.o
 
 clean:
 	powershell -NoProfile -Command "Remove-Item -Force -ErrorAction SilentlyContinue -Path '*.o','*.mod','*.log','*.exe','*~','$(OBJ_FILES)','$(MOD_FILES)'"

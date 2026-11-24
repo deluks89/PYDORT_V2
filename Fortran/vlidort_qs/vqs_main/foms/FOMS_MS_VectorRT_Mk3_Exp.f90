@@ -470,7 +470,8 @@ subroutine FOMS_MS_VectorRT_Mk3_Exp ( do_debug_MS_input, RT_Progress,      & ! I
 
 !  Accuracy, solar flux, grids
 
-   ACCURACY           = 0.00001d0
+!  Keep forward and profile-linearized Fourier convergence consistent.
+   ACCURACY           = 1.0d-12
    DO_DOUBLE_CONVTEST = .not. DO_RAYLEIGH_ONLY
    FLUX_FACTOR        = SOLARFLUX
    EARTH_RADIUS       = eradius

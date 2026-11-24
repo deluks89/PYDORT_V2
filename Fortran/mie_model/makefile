@@ -1,5 +1,7 @@
 # Define some variables
 
+.DEFAULT_GOAL := ALL
+
 MOD_PATH  = mod
 OBJ_PATH  = obj
 RTSMIE_PATH = ./Sourcecode
@@ -56,9 +58,18 @@ SOURCES_TM1 +=   \
 # Define pattern rules for creating object files:
 
 .SUFFIXES:
-$(OBJ_PATH)/%.o : $(RTSMIE_PATH)/%.f90
+
+# Order-only prerequisites create build directories without triggering rebuilds
+# merely because their timestamps change when object files are written.
+$(MOD_PATH):
+	@if not exist "$(MOD_PATH)" mkdir "$(MOD_PATH)"
+
+$(OBJ_PATH):
+	@if not exist "$(OBJ_PATH)" mkdir "$(OBJ_PATH)"
+
+$(OBJ_PATH)/%.o : $(RTSMIE_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : %.f90
+$(OBJ_PATH)/%.o : %.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
 
 # Define object files
@@ -69,7 +80,7 @@ F90OBJECTS_TM1 := $(patsubst %.f90, %.o, $(addprefix $(OBJ_PATH)/, $(F90SOURCES_
 ALL:  MIE_MODEL.exe
 
 MIE_MODEL.exe: $(F90OBJECTS_TM1)
-	$(FC) $^ -o $@
+	$(FC) $^ -static -o $@
 
 .PHONY: clean
 clean:

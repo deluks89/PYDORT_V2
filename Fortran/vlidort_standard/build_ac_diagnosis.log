@@ -1,7 +1,0 @@
-gfortran -c -O2 -Wall -fno-automatic -freal-8-real-16 -Imod -Jmod DRIVER.f90 -o obj/DRIVER.o
-DRIVER.f90:534:92:
-
-  534 |       VLIDORT_LinFixIn%Cont%TS_PROFILEWF_NAMES(1:n_jacobians) = jacobian_list(1:n_jacobians)
-      |                                                                                            1
-Warning: CHARACTER expression will be truncated in assignment (31/128) at (1) [-Wcharacter-truncation]
-gfortran obj/*.o  -Wl,--stack,536870912 -o DRIVER.exe

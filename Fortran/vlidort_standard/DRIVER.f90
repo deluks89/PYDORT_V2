@@ -16,6 +16,7 @@ program DRIVER
    use VLIDORT_LPS_SPHERCORR_ROUTINES_m
    use VLIDORT_AC_SPHERCORR_ROUTINES_m
    use VLIDORT_AC_LPS_SPHERCORR_ROUTINES_m
+   use sparse_aircraft_m
    use VLIDORT_L_INPUTS_m, only : VLIDORT_L_INIT_INPUTS, VLIDORT_LinSup_Init
 
    implicit none
@@ -36,7 +37,15 @@ program DRIVER
    logical :: do_calculate_flux_at_observer, do_calculate_flux_profiles
    logical :: do_deltam_scaling, do_rayleigh_only
    logical :: do_radiance_jacobians, do_actinic_flux_jacobians
-   logical :: do_sphericity_correction, do_aircraft_correction
+   logical :: do_irradiance, do_irradiance_jacobians
+   logical :: do_irradiance_orders
+   integer :: flux_pass, n_order_values, order_index
+   real(fpk) :: scattering_step, scatter_scale, scatter_albedo, order_direct
+   real(fpk) :: scatter_omega(MAXLAYERS)
+   real(fpk) :: order_samples(2+2*MAX_ATMOSWFS*MAXLAYERS,4)
+   real(fpk) :: order_diffuse(2+2*MAX_ATMOSWFS*MAXLAYERS)
+
+   logical :: do_sphericity_correction, do_aircraft_correction, do_sparse_aircraft
    logical :: fail, twilight_flag
    integer :: n_stokes, n_streams, n_fine_layers, sphercorr_points
    integer :: n_wavelengths, n_layers, n_aertypes, n_gases, n_jacobians
@@ -108,8 +117,21 @@ program DRIVER
       do_rayleigh_only, do_deltam_scaling, n_stokes, n_streams, n_fine_layers, &
       planet_radius, observer_height, solar_zenith_angle, viewing_zenith_angle, &
       relative_azimuth_angle, do_radiance_jacobians, do_actinic_flux_jacobians, &
-      backend_mode, sphercorr_points)
+      backend_mode, sphercorr_points, do_irradiance, do_irradiance_jacobians, &
+      do_irradiance_orders, scattering_step)
+   if (do_irradiance_jacobians .and. .not. do_irradiance) &
+      error stop 'Enable irradiance when requesting its Jacobians.'
+   ! Both angular moments share a single native flux solve.
+   do_calculate_flux_at_observer = do_calculate_flux_at_observer .or. do_irradiance
+   do_actinic_flux_jacobians = do_actinic_flux_jacobians .or. do_irradiance_jacobians
+   if (do_irradiance_orders) then
+      if (.not. do_irradiance .or. do_ss_only) error stop 'Orders require full-scattering irradiance.'
+      if (do_deltam_scaling .and. .not. do_rayleigh_only) error stop 'Disable delta-M for scattering orders.'
+      if (scattering_step < 1d-6 .or. scattering_step > 1d-2) error stop 'Invalid scattering-order step.'
+   endif
+
    call decode_backend_mode(backend_mode, do_sphericity_correction, do_aircraft_correction)
+   do_sparse_aircraft = trim(backend_mode) == 'aircraft_sparse'
    solver_vza = min(viewing_zenith_angle, 180.0_fpk - viewing_zenith_angle)
    if (do_ss_only) then
       do_sphericity_correction = .false.
@@ -129,6 +151,9 @@ program DRIVER
    call ReadArrayFromFile('INPUT/wavelengths.inp', MAX_WAVELENGTHS, 1, &
       n_wavelengths, dummy_integer, simulated_wavelengths)
    call ReadVerticalGrid('INPUT/vertical_grid.inp', MAXLAYERS, n_layers, layer_boundary_altitudes)
+   call external_observer_to_toa(planet_radius, layer_boundary_altitudes(0), observer_height, &
+      solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle, do_calculate_flux_at_observer)
+   solver_vza = min(viewing_zenith_angle, 180.0_fpk - viewing_zenith_angle)
    layer_thicknesses(1:n_layers) = layer_boundary_altitudes(0:n_layers-1) - layer_boundary_altitudes(1:n_layers)
 
    call ReadArrayFromFile('INPUT/pressure_profile.inp', MAXLAYERS, 1, n_layers, dummy_integer, pressure_profile)
@@ -185,6 +210,8 @@ program DRIVER
    open(11, file=trim(output_path)//'flux_diffuse_downwelling.out', status='replace')
    open(12, file=trim(output_path)//'flux_direct.out', status='replace')
    open(20, file=trim(output_path)//'radiances.out', status='replace')
+   if (do_irradiance) call open_irradiance_files(jacobian_list(1:n_jacobians), &
+      do_irradiance_jacobians, do_irradiance_orders)
 
    do q = 1, n_jacobians
       if (do_radiance_jacobians) then
@@ -213,6 +240,10 @@ program DRIVER
       enddo
       n_moments_input = min(n_moments_input, MAXMOMENTS_INPUT)
       if (do_rayleigh_only) n_moments_input = 2
+      ! Unscaled aerosol input must include the quadrature's required orders,
+      ! even when higher coefficients are zero (e.g. isotropic scattering).
+      if (.not. do_deltam_scaling .and. .not. do_rayleigh_only) &
+         n_moments_input = max(n_moments_input, 2*n_streams-1)
 
       rayleigh_greekcoeffs = RayleighGreekCoeffs(wavelength)
       aer_greekcoeffs_matrix = ZERO
@@ -380,20 +411,97 @@ program DRIVER
       endif
 
       if (do_calculate_flux_at_observer) then
+         n_order_values = 2
+         if (do_irradiance_jacobians) n_order_values = 2+2*n_jacobians*n_layers
+         scatter_omega(1:n_layers) = VLIDORT_ModIn%MOptical%TS_OMEGA_TOTAL_INPUT(1:n_layers)
+         scatter_albedo = VLIDORT_FixIn%Optical%TS_LAMBERTIAN_ALBEDO
+         do flux_pass = 0,merge(4,0,do_irradiance_orders)
+            if (flux_pass > 0) then
+               scatter_scale = scattering_step * 2d0**(flux_pass-1)
+               if (flux_pass == 4) scatter_scale = scattering_step/2d0
+               VLIDORT_ModIn%MOptical%TS_OMEGA_TOTAL_INPUT(1:n_layers) = scatter_omega(1:n_layers)*scatter_scale
+               VLIDORT_FixIn%Optical%TS_LAMBERTIAN_ALBEDO = scatter_albedo*scatter_scale
+            endif
          if (do_actinic_flux_jacobians) then
             call run_vlidort_jacobians_for_geometry(.false., radiance_stokes, profilewf_stokes)
             do q = 1, n_jacobians
-               write(50+q,*) VLIDORT_LinOut%Prof%TS_MEANST_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,UPIDX) * PI4
-               write(70+q,*) VLIDORT_LinOut%Prof%TS_MEANST_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,DNIDX) * PI4
-               write(90+q,*) VLIDORT_LinOut%Prof%TS_DNMEANST_DIRECT_PROFWF(q,1:n_layers,1,1,1) * PI4
+               if (flux_pass == 0) write(50+q,*) VLIDORT_LinOut%Prof%TS_MEANST_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,UPIDX) * PI4
+               if (flux_pass == 0) write(70+q,*) VLIDORT_LinOut%Prof%TS_MEANST_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,DNIDX) * PI4
+               if (flux_pass == 0) write(90+q,*) VLIDORT_LinOut%Prof%TS_DNMEANST_DIRECT_PROFWF(q,1:n_layers,1,1,1) * PI4
+               if (do_irradiance_jacobians) then
+                  if (flux_pass == 0) write(200+q,*) VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,UPIDX)
+                  if (flux_pass == 0) write(300+q,*) VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,1:n_layers,1,1,1,DNIDX)
+                  if (flux_pass == 0) write(400+q,*) VLIDORT_LinOut%Prof%TS_DNFLUX_DIRECT_PROFWF(q,1:n_layers,1,1,1)
+               endif
             enddo
          else
             call run_vlidort_for_geometry(.false., radiance_stokes)
          endif
-         write(10,*) VLIDORT_Out%Main%TS_MEANST_DIFFUSE(1,1,1,UPIDX) * PI4
-         write(11,*) VLIDORT_Out%Main%TS_MEANST_DIFFUSE(1,1,1,DNIDX) * PI4
-         write(12,*) VLIDORT_Out%Main%TS_DNMEANST_DIRECT(1,1,1) * PI4
+         if (flux_pass == 0) write(10,*) VLIDORT_Out%Main%TS_MEANST_DIFFUSE(1,1,1,UPIDX) * PI4
+         if (flux_pass == 0) write(11,*) VLIDORT_Out%Main%TS_MEANST_DIFFUSE(1,1,1,DNIDX) * PI4
+         if (flux_pass == 0) write(12,*) VLIDORT_Out%Main%TS_DNMEANST_DIRECT(1,1,1) * PI4
+         if (do_irradiance) then
+            if (flux_pass == 0) write(21,*) VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,UPIDX)
+            if (flux_pass == 0) write(22,*) VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,DNIDX)
+            if (flux_pass == 0) write(23,*) VLIDORT_Out%Main%TS_DNFLUX_DIRECT(1,1,1)
+         endif
+
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_diffuse(1) = VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,UPIDX)
+            else
+               order_samples(1,flux_pass) = VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,UPIDX)
+            endif
+            if (do_irradiance_jacobians) then
+               do q = 1,n_jacobians
+                  do n = 1,n_layers
+                     order_index = 2 + (q-1)*n_layers+n
+                     if (flux_pass == 0) then
+                        order_diffuse(order_index) = VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,n,1,1,1,UPIDX)
+                     else
+                        order_samples(order_index,flux_pass) = VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,n,1,1,1,UPIDX)
+                     endif
+                  enddo
+               enddo
+            endif
+         endif
+
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_diffuse(2) = VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,DNIDX)
+            else
+               order_samples(2,flux_pass) = VLIDORT_Out%Main%TS_FLUX_DIFFUSE(1,1,1,DNIDX)
+            endif
+            if (do_irradiance_jacobians) then
+               do q = 1,n_jacobians
+                  do n = 1,n_layers
+                     order_index = 2 + n_jacobians*n_layers + (q-1)*n_layers+n
+                     if (flux_pass == 0) then
+                        order_diffuse(order_index) = VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,n,1,1,1,DNIDX)
+                     else
+                        order_samples(order_index,flux_pass) = VLIDORT_LinOut%Prof%TS_FLUX_DIFFUSE_PROFWF(q,n,1,1,1,DNIDX)
+                     endif
+                  enddo
+               enddo
+            endif
+         endif
+
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_direct = VLIDORT_Out%Main%TS_DNFLUX_DIRECT(1,1,1)
+            else
+               if (abs(VLIDORT_Out%Main%TS_DNFLUX_DIRECT(1,1,1)-order_direct) > 1d-10+1d-8*abs(order_direct)) &
+                  error stop 'Direct irradiance changed during fixed-extinction scattering expansion.'
+            endif
+         endif
+         enddo
+         VLIDORT_ModIn%MOptical%TS_OMEGA_TOTAL_INPUT(1:n_layers) = scatter_omega(1:n_layers)
+         VLIDORT_FixIn%Optical%TS_LAMBERTIAN_ALBEDO = scatter_albedo
+         if (do_irradiance_orders) call write_irradiance_orders( &
+            order_samples(1:n_order_values,:), order_diffuse(1:n_order_values), &
+            scattering_step, n_layers, n_jacobians, do_irradiance_jacobians)
       endif
+
    enddo
 
    do q = 1, n_jacobians
@@ -403,6 +511,7 @@ program DRIVER
       endif
    enddo
    close(10); close(11); close(12); close(20)
+   if (do_irradiance) call close_irradiance_files(n_jacobians, do_irradiance_jacobians, do_irradiance_orders)
 
 contains
 
@@ -412,7 +521,9 @@ contains
       VLIDORT_FixIn%Bool%TS_DO_FULLRAD_MODE = .not. do_ss_only
       VLIDORT_FixIn%Bool%TS_DO_THERMAL_EMISSION = .false.
       VLIDORT_FixIn%Bool%TS_DO_SURFACE_EMISSION = .false.
-      VLIDORT_FixIn%Bool%TS_DO_PLANE_PARALLEL = .not. do_sphericity_correction
+      ! Use spherical-shell solar attenuation in every mode. The SC option
+      ! separately controls the line-of-sight correction for radiances.
+      VLIDORT_FixIn%Bool%TS_DO_PLANE_PARALLEL = .false.
       VLIDORT_FixIn%Bool%TS_DO_UPWELLING = .true.
       VLIDORT_FixIn%Bool%TS_DO_DNWELLING = .true.
       VLIDORT_FixIn%Bool%TS_DO_TOA_CONTRIBS = .false.
@@ -441,7 +552,9 @@ contains
       VLIDORT_FixIn%Cont%TS_NLAYERS = n_layers
       VLIDORT_FixIn%Cont%TS_NFINELAYERS = n_fine_layers
       VLIDORT_FixIn%Cont%TS_N_THERMAL_COEFFS = 2
-      VLIDORT_FixIn%Cont%TS_VLIDORT_ACCURACY = 1.0d-6
+      ! Weak Fourier terms can still matter for aerosol Jacobians. A looser
+      ! radiance-only criterion produced discontinuities in AOD sweeps.
+      VLIDORT_FixIn%Cont%TS_VLIDORT_ACCURACY = 1.0d-9
       ! Near-conservative vector Jacobians need tightly converged eigenvectors
       ! as well as the binary128 arithmetic selected by the gfortran build.
       VLIDORT_FixIn%Cont%TS_ASYMTX_TOLERANCE = 1.0d-28
@@ -484,7 +597,7 @@ contains
       VLIDORT_ModIn%MBool%TS_DO_SSCORR_TRUNCATION = .false.
       VLIDORT_ModIn%MBool%TS_DO_SSCORR_USEFMAT = .false.
       VLIDORT_ModIn%MBool%TS_DO_EXTERNAL_WLEAVE = .false.
-      VLIDORT_ModIn%MBool%TS_DO_DOUBLE_CONVTEST = .false.
+      VLIDORT_ModIn%MBool%TS_DO_DOUBLE_CONVTEST = .true.
       VLIDORT_ModIn%MBool%TS_DO_SOLAR_SOURCES = .true.
       VLIDORT_ModIn%MBool%TS_DO_CLASSICAL_SOLUTION = .true.
       VLIDORT_ModIn%MBool%TS_DO_REFRACTIVE_GEOMETRY = .false.
@@ -555,8 +668,13 @@ contains
    subroutine run_vlidort_for_geometry(for_radiance, stokes_out)
       logical, intent(in) :: for_radiance
       real(kind=fpk), intent(out) :: stokes_out(4)
+      real(kind=fpk) :: unused_jac(MAX_ATMOSWFS,MAXLAYERS)
 
       stokes_out = ZERO
+      if (for_radiance .and. do_sparse_aircraft) then
+         call run_sparse_aircraft(.false.,stokes_out,unused_jac)
+         return
+      endif
       fail = .false.; twilight_flag = .false.
       main_message = ' '; local_message = ' '; local_action = ' '
 
@@ -614,6 +732,10 @@ contains
 
       stokes_out = ZERO
       profilewf_out = ZERO
+      if (for_radiance .and. do_sparse_aircraft) then
+         call run_sparse_aircraft(.true.,stokes_out,profilewf_out)
+         return
+      endif
       fail = .false.; twilight_flag = .false.
       main_message = ' '; local_message = ' '; local_action = ' '
 
@@ -682,6 +804,31 @@ contains
       endif
       if (for_radiance) call write_rt_diagnostics(.true., stokes_out)
    end subroutine run_vlidort_jacobians_for_geometry
+
+   subroutine run_sparse_aircraft(linearized,stokes,profile)
+      logical, intent(in) :: linearized
+      real(fpk), intent(out) :: stokes(4), profile(MAX_ATMOSWFS,MAXLAYERS)
+      real(fpk) :: ms(4), ms_jac(MAX_ATMOSWFS,MAXLAYERS,4)
+
+      call configure_radiance_geometry(output_diridx)
+      call prepare_standard_first_order(linearized)
+      stokes = VLIDORT_Sup%SS%TS_STOKES_SS(1,1,:,output_diridx)
+      profile = ZERO
+      if (linearized) profile(1:n_jacobians,1:n_layers) = &
+         VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_SS(1:n_jacobians,1:n_layers,1,1,1,output_diridx)
+      if (output_diridx == UPIDX) then
+         stokes = stokes+VLIDORT_Sup%SS%TS_STOKES_DB(1,1,:)
+         if (linearized) profile(1:n_jacobians,1:n_layers) = profile(1:n_jacobians,1:n_layers)+ &
+            VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_DB(1:n_jacobians,1:n_layers,1,1,1)
+      endif
+      if (.not. do_ss_only) then
+         call sparse_aircraft_ms(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_LinFixIn, &
+            VLIDORT_LinModIn,VLIDORT_LinSup,linearized,obs_height_clamped/1000.0_fpk, &
+            solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle,sphercorr_points,ms,ms_jac)
+         stokes = stokes+ms
+         if (linearized) profile = profile+ms_jac(:,:,1)
+      endif
+   end subroutine run_sparse_aircraft
 
    subroutine write_rt_diagnostics(linearized, stokes)
       logical, intent(in) :: linearized
@@ -795,6 +942,16 @@ contains
       fo_mod = VLIDORT_ModIn
       fo_linmod = VLIDORT_LinModIn
       fo_fix%Bool%TS_DO_FULLRAD_MODE = .false.
+      ! A full local solve retains delta-M-scaled FO extinction. Its diffuse
+      ! output is discarded; the main calculation supplies MS separately.
+      if (fo_mod%MBool%TS_DO_DELTAM_SCALING .and. &
+          .not. fo_mod%MBool%TS_DO_RAYLEIGH_ONLY) then
+         if (do_ss_only) then
+            fo_mod%MBool%TS_DO_DELTAM_SCALING = .false.
+         else
+            fo_fix%Bool%TS_DO_FULLRAD_MODE = .true.
+         endif
+      endif
       fo_fix%Bool%TS_DO_PLANE_PARALLEL = .false.
       fo_fix%Bool%TS_DO_SPHERICITY_CORRECTION = .false.
       fo_fix%Bool%TS_DO_MSSTS = .false.
@@ -830,8 +987,12 @@ contains
             write(*,*) 'Standard spherical FO: limb ray misses surface; use VLIDORT-QS.'
             stop 6
          endif
-         call AC_to_BOA_geometry_conversion(radius, boa, altitude, theta, alpha, phi, &
-            cosscat, theta_boa, alpha_boa, phi_boa)
+         if (do_sparse_aircraft .and. alpha < 1.0e-10_fpk) then
+            theta_boa = theta; alpha_boa = alpha; phi_boa = phi
+         else
+            call AC_to_BOA_geometry_conversion(radius, boa, altitude, theta, alpha, phi, &
+               cosscat, theta_boa, alpha_boa, phi_boa)
+         endif
          fo_mod%MSunrays%TS_SZANGLES(1) = theta_boa
          fo_mod%MUserVal%TS_USER_VZANGLES_INPUT(1) = alpha_boa
          fo_mod%MUserVal%TS_USER_RELAZMS(1) = phi_boa
@@ -858,8 +1019,39 @@ contains
 
    subroutine configure_radiance_geometry(diridx)
       integer, intent(out) :: diridx
+      real(kind=fpk), parameter :: nadir_offset_deg = 1.0d-5
+      real(kind=fpk) :: radius, boa, altitude, theta, alpha, phi
+      real(kind=fpk) :: cosscat, theta_boa, alpha_boa, phi_boa
 
       call reset_single_geometry()
+      ! The Standard spherical-correction geometry is singular for an exactly
+      ! vertical LOS. Evaluate its near-nadir limit in BOTH forward and LPS
+      ! calls. Keep the public geometry and flux geometry unchanged; AC has
+      ! separate geometry handling and is not covered by this regularization.
+      if (do_sphericity_correction .and. .not. do_aircraft_correction) then
+         theta = solar_zenith_angle
+         alpha = max(solver_vza,nadir_offset_deg)
+         phi = relative_azimuth_angle
+         ! The SC master takes BOA-referenced angles, including for TOA
+         ! output. The public angles refer to the observer (or converted TOA
+         ! intersection for an observer above the model atmosphere).
+         if (viewing_zenith_angle > 90.0_fpk) then
+            radius = planet_radius
+            boa = layer_boundary_altitudes(n_layers) / 1000.0_fpk
+            altitude = obs_height_clamped / 1000.0_fpk
+            if ((radius+altitude)*sin(alpha*acos(-ONE)/180.0_fpk) >= radius+boa) then
+               write(*,*) 'Standard spherical correction: ray misses surface; use VLIDORT-QS.'
+               stop 6
+            endif
+            call AC_to_BOA_geometry_conversion(radius, boa, altitude, theta, alpha, phi, &
+               cosscat, theta_boa, alpha_boa, phi_boa)
+            theta = theta_boa; alpha = alpha_boa; phi = phi_boa
+         endif
+         VLIDORT_ModIn%MSunrays%TS_SZANGLES(1) = theta
+         VLIDORT_ModIn%MUserVal%TS_USER_VZANGLES_INPUT(1) = alpha
+         VLIDORT_ModIn%MUserVal%TS_USER_RELAZMS(1) = phi
+         VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,:) = (/theta,alpha,phi/)
+      endif
       VLIDORT_FixIn%Bool%TS_DO_SPHERICITY_CORRECTION = do_sphericity_correction
       VLIDORT_FixIn%Bool%TS_DO_MSSTS = do_sphericity_correction
       if (do_aircraft_correction) then

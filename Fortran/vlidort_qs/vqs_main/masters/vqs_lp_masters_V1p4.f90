@@ -696,7 +696,7 @@
 !  Set truncation factor
 !    - Only set this if multiple scattering is being done
 
-      if ( do_MSRT .and. .not. do_Rayleigh_only ) then
+      if ( do_MSRT .and. do_deltam_scaling .and. .not. do_Rayleigh_only ) then
         nstreams_2 = 2 * nstreams ; dnm4 = dble(2*nstreams_2+1)
         do n = 1, nlayers
           FO_truncfac(n) = FO_greekmat(n,nstreams_2,1,1)/ dnm4
@@ -750,7 +750,7 @@
 !  Set linearized truncation factor
 !    - Only set this if multiple scattering is being done
 
-      if ( do_msrt .and. .not.do_Rayleigh_only ) then
+      if ( do_MSRT .and. do_deltam_scaling .and. .not. do_Rayleigh_only ) then
          nstreams_2 = 2 * nstreams ; dnm4 = dble(2*nstreams_2+1)
          do n = 1, nlayers
             tms = 1.0_ffp - FO_omega(n) * FO_truncfac(n)

@@ -1,3 +1,36 @@
 /physics_data/literature_spectra/_raw/
 /physics_data/literature_spectra/_raw_kurucz/
 /physics_data/literature_spectra/_raw_tsis/
+
+# TROPOMI surface-albedo datasets (all versions)
+/physics_data/surface_albedo/TROPOMI_Sentinel-5P_*.nc
+
+# Compiled objects, Fortran modules, and executables
+*.o
+*.mod
+*.exe
+
+# Build directories are created automatically by the makefiles
+/Fortran/*/mod/
+/Fortran/*/obj/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Compiler logs, editor backups, and desktop metadata
+/Fortran/**/build*.log
+*~
+.directory
+*.lnk
+/Examples/testing
+/tmp/
+
+# Generated Fortran inputs and outputs; retain the directory placeholders
+/Fortran/*/INPUT/**
+!/Fortran/*/INPUT/**/
+!/Fortran/*/INPUT/**/.gitkeep
+/Fortran/*/OUTPUT/**
+!/Fortran/*/OUTPUT/**/
+!/Fortran/*/OUTPUT/**/.gitkeep

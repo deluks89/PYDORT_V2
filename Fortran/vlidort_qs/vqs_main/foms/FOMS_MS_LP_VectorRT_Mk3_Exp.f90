@@ -581,7 +581,8 @@ subroutine FOMS_MS_LP_VectorRT_Mk3_Exp ( do_debug_MS_input, RT_Progress,    & ! 
 
 !   Accuracy, solar flux, grids
 
-   ACCURACY         = 0.00001d0
+!  Weak Fourier terms can remain significant in aerosol Jacobians.
+   ACCURACY         = 1.0d-12
    DO_DOUBLE_CONVTEST = .not. DO_RAYLEIGH_ONLY
    FLUX_FACTOR      = SOLARFLUX
    EARTH_RADIUS     = eradius

@@ -770,7 +770,8 @@
                          SUM_ActFlux = DOT_PRODUCT(QUAD_HALFWTS(1:NSTREAMS),QJACOBIANS_F(Q,1:NSTREAMS,O1,K))
                          SUM_RegFlux = DOT_PRODUCT(QUAD_STRMWTS(1:NSTREAMS),QJACOBIANS_F(Q,1:NSTREAMS,O1,K))
                          LOCAL_LP_FLUXES(KV,Q,IGEOM,O1,K,1) = SUM_ActFlux
-                         LOCAL_LP_FLUXES(KV,Q,IGEOM,O1,K,2) = SUM_RegFlux
+                         ! Match the 2*pi azimuth integration in LOCAL_FLUXES.
+                         LOCAL_LP_FLUXES(KV,Q,IGEOM,O1,K,2) = SUM_RegFlux * PI2
                        ENDDO
                      ENDDO
                    ENDDO

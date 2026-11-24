@@ -36,6 +36,7 @@ class RadiativeTransferModel(str, Enum):
 
 class SphericityCorrection(IntEnum):
     """Public spherical-correction accuracy levels."""
+    EXPERIMENTAL = 0
     NONE = 1
     TWO_POINT = 2
     THREE_POINT = 3
@@ -66,7 +67,8 @@ MAX_PF_MOMENTS = 500 # MUST NOT BE LARGER THAN MAXMOMENTS_INPUT IN Fortran/vlido
 PF_MOMENT_CUTOFF = 1e-15 # PHASE FUNCTION MOMENTS WITH SMALLER VALUES WILL BE DISCARDED.
 
 # Lower limits applied when writing RT input files (avoid numerical issues):
-LOWER_LIMIT_AEROSOL_EXTINCTION = 1e-10 # [1/km]
+# Numerical background for active aerosol profiles; see aerosol_floor_1e8_validation.
+LOWER_LIMIT_AEROSOL_EXTINCTION = 1e-8 # [1/km], at each type's profile wavelength
 LOWER_LIMIT_GAS_CONCENTRATION  = 1.    # [molec/cm3]
 LOWER_LIMIT_SURFACE_ALBEDO     = 1e-10
 
@@ -820,7 +822,10 @@ class ViewingGeometry(FrozenContainer):
     
     observer_height_agl: integer, must be greater > 0.
         Height of observer above ground level in meters.
-        If higher than TOA, observer is set to TOA (inside VLIDORT FORTRAN code) to ensure proper functionality.
+        Above TOA, the Fortran drivers trace the viewing ray to its TOA entry
+        and transform the viewing and solar angles from the observer's local
+        frame. Supported for radiance only, for rays entering the atmosphere
+        on the dayside. Angles supplied here are always at the actual observer.
         
     sza: float, 0 <= sza <= 90 
         Solar zenith angle in degree. Zero is zenith. 90 is horizon.
@@ -909,15 +914,31 @@ class SettingsRT(FrozenContainer):
     
     sphericity_correction: int, default is 1.
         Selects the spherical-correction accuracy and the Fortran backend:
+        0 uses experimental sparse, transmission-normalized aircraft MS sources.
+        This supports upward-looking rays without a surface extension and
+        surface-intersecting downward-looking rays. Turning rays use QS.
         1 uses Standard VLIDORT with spherical first-order scattering but
         no multiple-scattering spherical correction, 2 uses the
         2-point interpolated correction, 3 uses the 3-point interpolated
         correction at/above TOA and VLIDORT-QS below TOA, and 4 or higher uses
-        VLIDORT-QS full spherical correction. Unsupported aircraft geometries
+        VLIDORT-QS full spherical correction. Unsupported original 2-point geometries
         (including rays whose extension misses the surface, and observers
         between layer boundaries) fall back to QS with a warning.
     do_actinic_flux_at_observer: bool, default is False.
         Set to true if you require actinic fluxes at the exact observer altitude only.
+    do_irradiance_at_observer: bool, default is False.
+        Calculate cosine-weighted irradiance on a local horizontal plane,
+        at the observer altitude (at or below TOA only).
+    do_irradiance_jacobians: bool, default is False.
+        Calculate layer-resolved irradiance derivatives for jacobian_list.
+        Requires do_irradiance_at_observer=True.
+    do_irradiance_scattering_components: bool, default is False.
+        Separate first-order and multiply scattered irradiance. One surface
+        reflection counts as first order. Requires a full calculation without
+        delta-M scaling; adds four weak-scattering flux solves per wavelength.
+    irradiance_scattering_step: float, default is 1e-3.
+        Expansion step (1e-6 through 1e-2). Two extrapolations are compared
+        internally; a failed convergence check raises a backend error.
     do_radiance: bool, default is True.
         Set to true if you require radiances at the observer and the specified viewing geometry.
     do_actinic_flux_jacobians: bool, default is False.
@@ -929,6 +950,8 @@ class SettingsRT(FrozenContainer):
         If True, the contribution from multiply scattered light is omitted.
     n_full_sphericity_fine_layers: int, default is 4.
         Subdivision of atmospheric layers used by full-sphericity calculations.
+    n_aircraft_source_points: int, default is 5.
+        Number of local MS solutions for experimental correction 0 (2 to 33).
     jacobian_layer_flags: String ('all') or list of booleans with length equal to the number of profile layers.
         Limits the jacobian calculation to distinct layers to improve computational efficiency.
         if 'all', jacobian calculation will be performed inall layers.
@@ -938,7 +961,12 @@ class SettingsRT(FrozenContainer):
     """
     def __init__(self):
         super().__init__(['sphericity_correction',
+                          'n_aircraft_source_points',
                           'do_actinic_flux_at_observer',
+                          'do_irradiance_at_observer',
+                          'do_irradiance_jacobians',
+                          'do_irradiance_scattering_components',
+                          'irradiance_scattering_step',
                           'do_radiance',
                           'do_actinic_flux_jacobians',
                           'do_radiance_jacobians',
@@ -953,7 +981,12 @@ class SettingsRT(FrozenContainer):
                           'do_single_scattering_only',
                           'n_full_sphericity_fine_layers'])
         self.sphericity_correction = SphericityCorrection.NONE.value
+        self.n_aircraft_source_points = 5
         self.do_actinic_flux_at_observer = False
+        self.do_irradiance_at_observer = False
+        self.do_irradiance_jacobians = False
+        self.do_irradiance_scattering_components = False
+        self.irradiance_scattering_step = 1e-3
         self.do_radiance = True
         self.do_actinic_flux_jacobians = False
         self.do_radiance_jacobians = False
@@ -972,10 +1005,18 @@ class SettingsRT(FrozenContainer):
         return copy.deepcopy(self)
 
     def validate_backend_settings(self):
+        if self.do_irradiance_scattering_components:
+            if not self.do_irradiance_at_observer or self.do_single_scattering_only:
+                raise ValueError('Scattering components require irradiance and a full-scattering calculation.')
+            if not 1e-6 <= self.irradiance_scattering_step <= 1e-2:
+                raise ValueError('irradiance_scattering_step must be between 1e-6 and 1e-2.')
+        if self.do_irradiance_jacobians and not self.do_irradiance_at_observer:
+            raise ValueError('Enable do_irradiance_at_observer when requesting irradiance Jacobians.')
         raw_correction = self.sphericity_correction
         if isinstance(raw_correction, bool):
             raise AssertionError(
                 'settings_rt.sphericity_correction must be an integer: '
+                '0=experimental sparse-source correction, '
                 '1=no correction, 2=2-point interpolation, '
                 '3=3-point interpolation, >=4=full spherical correction.'
             )
@@ -984,27 +1025,35 @@ class SettingsRT(FrozenContainer):
         except (TypeError, ValueError):
             raise AssertionError(
                 'settings_rt.sphericity_correction must be an integer: '
+                '0=experimental sparse-source correction, '
                 '1=no correction, 2=2-point interpolation, '
                 '3=3-point interpolation, >=4=full spherical correction.'
             )
         if isinstance(raw_correction, str):
             assert raw_correction.strip() == str(correction), (
                 'settings_rt.sphericity_correction must be an integer: '
+                '0=experimental sparse-source correction, '
                 '1=no correction, 2=2-point interpolation, '
                 '3=3-point interpolation, >=4=full spherical correction.'
             )
         else:
             assert float(raw_correction) == float(correction), (
                 'settings_rt.sphericity_correction must be an integer: '
+                '0=experimental sparse-source correction, '
                 '1=no correction, 2=2-point interpolation, '
                 '3=3-point interpolation, >=4=full spherical correction.'
             )
-        assert correction >= 1, (
-            'settings_rt.sphericity_correction must be >= 1: '
+        assert correction >= 0, (
+            'settings_rt.sphericity_correction must be >= 0: '
+            '0=experimental sparse-source aircraft correction, '
             '1=no correction, 2=2-point interpolation, '
             '3=3-point interpolation, >=4=full spherical correction.'
         )
         self.sphericity_correction = correction
+        points = self.n_aircraft_source_points
+        assert not isinstance(points, bool) and isinstance(points, (int, np.integer)) and 2 <= points <= 33, (
+            'settings_rt.n_aircraft_source_points must be an integer from 2 to 33.'
+        )
 
 
 class PressureProfile(GenericProfile):
@@ -2166,8 +2215,8 @@ class MicrophysicalAerosol():
             ', '.join([str(self.psd.r1),str(self.psd.r2),str(self.psd.r3)]) + '  ! modal radii',
             ', '.join([str(s1),str(s2),str(s3)]) + '   ! modal widths expressed as exp(sigma)',
             ', '.join([str(f1),str(f2),str(f3)]) + '   ! modal fractions',
-            str(self.psd.get_rmin())[1:-1] + '   ! rmin',
-            str(self.psd.get_rmax())[1:-1] + '   ! rmax'])
+            ', '.join(str(float(value)) for value in self.psd.get_rmin()) + '   ! rmin',
+            ', '.join(str(float(value)) for value in self.psd.get_rmax()) + '   ! rmax'])
          
         with open(path_mie_model + 'INPUT/configuration.inp','w+') as f:
             f.write(config_string)
@@ -2965,6 +3014,79 @@ class ResultsRT():
         ser.index.name = 'wavelength'
         return ser
     
+    def _get_irradiance_array(self, direction, component, jac_label=None):
+        if direction not in ('down', 'up', 'net', 'sum'):
+            raise ValueError('direction must be down, up, net or sum')
+        if component not in ('direct', 'diffuse', 'total', 'single', 'multiple'):
+            raise ValueError('component must be direct, diffuse, total, single or multiple')
+        prefix = 'irradiance_' if jac_label is None else 'jacs_irradiance_'
+        suffix = '' if jac_label is None else '_' + jac_label
+        arrays = []
+        names = (component + '_upwelling', component + '_downwelling') if component in ('single', 'multiple') else (
+            'diffuse_upwelling', 'diffuse_downwelling', 'direct')
+        for name in names:
+            value = getattr(self._raw, prefix + name + suffix, None)
+            if value is None:
+                raise ValueError('Requested irradiance or irradiance Jacobians were not calculated.')
+            arrays.append(np.asarray(value, dtype=float).copy())
+        if component in ('single', 'multiple'):
+            up, down = arrays
+            return {'up': up, 'down': down, 'net': down-up, 'sum': down+up}[direction]
+        up, down, direct = arrays
+        if component == 'direct':
+            up, down = np.zeros_like(up), direct
+        elif component == 'total':
+            down = down + direct
+        return {'up': up, 'down': down, 'net': down-up, 'sum': down+up}[direction]
+
+    def _irradiance_scale(self, normalized, units):
+        if units not in ('photons', 'energy'):
+            raise ValueError('units must be photons or energy')
+        wls = self._parent_vpc.wavelengths.copy()
+        if normalized:
+            return np.ones(len(wls))
+        scale = self._parent_vpc.solar_spectrum.get_values(wls).flatten()
+        if units == 'energy':
+            # photons / (s cm2 nm) -> W / (m2 nm), using exact SI constants.
+            scale = scale * 1e4 * 6.62607015e-34 * 299792458.0 / (wls * 1e-9)
+        return scale
+
+    def get_irradiance(self, direction='down', component='total', normalized=False, units='photons'):
+        """Spectral irradiance on a local horizontal plane at the observer.
+
+        direction: down/up (positive magnitudes), net (down minus up), or sum.
+        component: direct/diffuse/total/single/multiple. Upward direct solar
+        irradiance is zero. Single includes one surface reflection or one
+        atmospheric scattering. Single/multiple require the scattering-
+        components setting; direct + single + multiple equals total.
+        units: photons [photons/s/cm2/nm] or energy [W/m2/nm]. With normalized=True,
+        return the ratio to TOA solar beam irradiance, independent of units.
+        Observer must be at or below TOA. Returns a wavelength-indexed Series.
+        """
+        values = self._get_irradiance_array(direction, component).reshape(-1)
+        result = pd.Series(values * self._irradiance_scale(normalized, units),
+                           index=self._parent_vpc.wavelengths.copy(), name='irradiance')
+        result.index.name = 'wavelength'
+        return result
+
+    def get_irradiance_jacobians(self, jac_label='absorption', direction='down', component='total',
+                                normalized=False, units='photons'):
+        """Layer-resolved derivatives of get_irradiance, with the same scaling.
+
+        Uses settings_rt.jacobian_list labels and jacobian_layer_flags. Rows
+        are layer-middle altitudes [m]; columns are wavelengths [nm]. Physical
+        derivatives use the requested irradiance units per parameter unit;
+        normalized=True returns derivatives of solar-normalized irradiance.
+        """
+        values = self._get_irradiance_array(direction, component, jac_label)
+        wls = self._parent_vpc.wavelengths.copy()
+        values = values.reshape(len(wls), self._parent_vpc.get_n_layers()).T[::-1]
+        result = pd.DataFrame(values * self._irradiance_scale(normalized, units),
+                              index=self._parent_vpc.get_layer_middles(), columns=wls)
+        result.index.name = 'altitude'
+        result.columns.name = 'wavelength'
+        return result
+
     def get_radiance(self, normalized = False):
         """
         Returns the radiances [photons/s/cm2/sr/nm] at the simulated wavelengths
@@ -3310,6 +3432,18 @@ class Pydort(VerticalGrid):
         ray_radius = (radius + height) * np.sin(np.deg2rad(min(vza, 180.0-vza)))
         misses_surface = ray_radius >= radius + grid[0]
 
+        if correction == SphericityCorrection.EXPERIMENTAL.value:
+            if self.settings_rt.do_radiance:
+                if vza > 90 and misses_surface:
+                    return qs_fallback('experimental sparse-source correction does not yet support turning rays')
+                if vza == 90:
+                    return qs_fallback('experimental sparse-source correction does not yet support exactly horizontal rays')
+            return {
+                'model': RadiativeTransferModel.AIRCRAFT.value,
+                'backend_mode': 'aircraft_sparse',
+                'sphericity_interpolation_points': self.settings_rt.n_aircraft_source_points,
+            }
+
         if correction == SphericityCorrection.NONE.value:
             if self.settings_rt.do_radiance and vza > 90 and misses_surface:
                 return qs_fallback('the spherical first-order limb ray does not intersect the surface')
@@ -3382,7 +3516,7 @@ class Pydort(VerticalGrid):
         if run_aerosol_models: self.aerosols.run_models(self.wavelengths)
         
         # Calculate necessary aerosol-jacobians:
-        if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians:
+        if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians or self.settings_rt.do_irradiance_jacobians:
             for jlbl in self.settings_rt.jacobian_list:
                 if jlbl in aerosol_dic or not '_' in jlbl: continue # skip non-aerosol-parameter jacobians
                 if not run_aerosol_models: warnings.warn('Mie model jacobians are calculated based on results from old Mie model run!')
@@ -3417,9 +3551,10 @@ class Pydort(VerticalGrid):
         # for q in self.settings_rt.jacobian_list:
         #     assert q in _valid, q + ' is not a valid jacobian identifier. Check pyd.settings_rt.jacobian_list. Valid entries are\n' + str(_valid)
         if not len(self.settings_rt.jacobian_list):
-            if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians:
-                warnings.warn('Jacobian list empty. The flags do_radiance_jacobians and do_actinic_flux_jacobians will be set to False.')
+            if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians or self.settings_rt.do_irradiance_jacobians:
+                warnings.warn('Jacobian list empty. All Jacobian calculation flags will be set to False.')
                 self.settings_rt.do_actinic_flux_jacobians = self.settings_rt.do_radiance_jacobians = False
+                self.settings_rt.do_irradiance_jacobians = False
         
         # Delete old data specific gas species and aerosol types:
         for f in Path(path_qs_backend + 'INPUT').glob("**/*.inp"): f.unlink()                 
@@ -3452,7 +3587,11 @@ class Pydort(VerticalGrid):
         d = np.vstack(d_list).T[::-1]
         assert bool(len(d_list)), 'Provide at least one (dummy) aerosol type!'
         is_aerosol_zero = not bool(d.sum())  # needed later for configuration file
-        d[d<LOWER_LIMIT_AEROSOL_EXTINCTION] = LOWER_LIMIT_AEROSOL_EXTINCTION
+        # Raise the background only for aerosol types that are actually present.
+        # Preserve the legacy tiny guard for inactive types / the Rayleigh dummy.
+        floors = np.where(np.any(d > 0, axis=0), LOWER_LIMIT_AEROSOL_EXTINCTION,
+                          min(LOWER_LIMIT_AEROSOL_EXTINCTION, 1e-10))
+        d = np.maximum(d, floors)
         header_comment = ' '.join(list(aerosol_dic.keys()))
         array_to_rt_input('aerosol_extinction_profiles.inp', d, header_comment)
           
@@ -3553,7 +3692,7 @@ class Pydort(VerticalGrid):
                 f.write(f"{s}\n")
         
         # Aerosol model Jacobians:
-        if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians:
+        if self.settings_rt.do_radiance_jacobians or self.settings_rt.do_actinic_flux_jacobians or self.settings_rt.do_irradiance_jacobians:
             for jlbl in self.settings_rt.jacobian_list:
                 if jlbl in aerosol_dic or not '_' in jlbl:continue
                 albl,plbl = jlbl.rsplit('_', 1)
@@ -3626,6 +3765,9 @@ class Pydort(VerticalGrid):
             do_deltam = False
             do_rayleigh_only = True
 
+        if self.settings_rt.do_irradiance_scattering_components and do_deltam:
+            raise ValueError('Scattering-order irradiances require do_deltam_phase_function_scaling=False.')
+
         values = [str(self.settings_rt.do_single_scattering_only),
                   str(self.settings_rt.do_vectorized_simulation),
                   str(self.settings_rt.do_radiance),
@@ -3643,7 +3785,11 @@ class Pydort(VerticalGrid):
                   str(self.settings_rt.do_radiance_jacobians),
                   str(self.settings_rt.do_actinic_flux_jacobians),
                   active_backend['backend_mode'],
-                  str(int(active_backend['sphericity_interpolation_points']))]
+                  str(int(active_backend['sphericity_interpolation_points'])),
+                  str(self.settings_rt.do_irradiance_at_observer),
+                  str(self.settings_rt.do_irradiance_jacobians),
+                  str(self.settings_rt.do_irradiance_scattering_components),
+                  str(self.settings_rt.irradiance_scattering_step)]
         comments = ['Flag for performing only single scatter (FO) radiative transfer, no multiple scattering (MS)',
                     'Flag for performing a vector calculation',
                     'Flag for calculating the radiance at the desired viewing geometry',
@@ -3661,7 +3807,11 @@ class Pydort(VerticalGrid):
                     'Flag for radiance jacobian calculations',
                     'Flag for actinic flux jacobian calculation',
                     'Resolved radiative-transfer backend mode',
-                    'Resolved sphericity interpolation points for Standard/AC corrections']
+                    'Resolved sphericity interpolation points for Standard/AC corrections',
+                    'Flag for horizontal irradiance at observer altitude',
+                    'Flag for irradiance Jacobians',
+                    'Flag for irradiance scattering-order decomposition',
+                    'Scattering-strength expansion step']
         with open(path_qs_backend + 'INPUT/configuration.inp', 'w') as f:
             for v,c in zip(values,comments):
                 f.write(v + '\t! ' + c + '\n')

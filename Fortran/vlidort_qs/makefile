@@ -8,6 +8,8 @@
 
 # Define some variables
 
+.DEFAULT_GOAL := set2
+
 UTIL_PATH           = util
 VSUP_PATH           = vsup
 VQS_DEF_PATH        = vqs_def
@@ -28,7 +30,7 @@ OBJ_FILES = $(OBJ_PATH)/*.o
 
 # Define default shell make will use
 
-SHELL = /bin/bash
+SHELL = cmd.exe
 
 # Define FORTRAN90 compiler to use (can be defined here, but usually defined on makefile command line)
 
@@ -247,21 +249,28 @@ DRIVER_SOURCES += \
 
 # Define pattern rules for creating object files:
 
-$(OBJ_PATH)/%.o : $(SUPPORT_PATH)/%.f90
+# Use the same automatic directory setup as the Standard and Mie builds.
+$(MOD_PATH):
+	@if not exist "$(MOD_PATH)" mkdir "$(MOD_PATH)"
+
+$(OBJ_PATH):
+	@if not exist "$(OBJ_PATH)" mkdir "$(OBJ_PATH)"
+
+$(OBJ_PATH)/%.o : $(SUPPORT_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_DEF_PATH)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_DEF_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_FOMS_PATH)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_FOMS_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_MSSEG_PATH1)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_MSSEG_PATH1)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_MSSEG_PATH2)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_MSSEG_PATH2)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_MASTER_AUX_PATH)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_MASTER_AUX_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : $(VQS_MASTER_PATH)/%.f90
+$(OBJ_PATH)/%.o : $(VQS_MASTER_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
-$(OBJ_PATH)/%.o : %.f90
+$(OBJ_PATH)/%.o : %.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
 
 
@@ -274,7 +283,7 @@ DRIVER_OBJECTS := $(patsubst %.f90, %.o, $(addprefix $(OBJ_PATH)/, $(DRIVER_SOUR
 set2: DRIVER.exe
 
 DRIVER.exe: $(DRIVER_OBJECTS)
-	$(FC) $^ -o $@
+	$(FC) $^ -static -o $@
 
 .PHONY: clean
 clean:

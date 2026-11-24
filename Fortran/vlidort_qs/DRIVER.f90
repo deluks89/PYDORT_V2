@@ -160,6 +160,15 @@ program DRIVER
    real(kind=ffp) :: solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle
    Logical        :: do_radiance_jacobians
    Logical        :: do_actinic_flux_jacobians
+   logical :: do_irradiance, do_irradiance_jacobians
+   logical :: do_irradiance_orders
+   integer :: flux_pass, n_order_values, order_index
+   real(fpk) :: scattering_step, scatter_scale, scatter_albedo, order_direct
+   real(fpk) :: ground_up, ground_up_jac(MAXLAYERS)
+   real(fpk) :: scatter_omega(MAXLAYERS)
+   real(fpk) :: order_samples(2+2*MAX_ATMOSWFS*MAXLAYERS,4)
+   real(fpk) :: order_diffuse(2+2*MAX_ATMOSWFS*MAXLAYERS)
+
    integer        :: n_fine_layers
 
    integer        :: n_nonzero_greekmat_entries
@@ -282,7 +291,20 @@ program DRIVER
        planet_radius,                                                      & ! Planet properties
        observer_height,                                                    & ! Viewing geometry
        solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle,   & ! Viewing geometry
-       do_radiance_jacobians, do_actinic_flux_jacobians)                     ! Jacobian control
+       do_radiance_jacobians, do_actinic_flux_jacobians, &
+       do_irradiance=do_irradiance, do_irradiance_jacobians=do_irradiance_jacobians, &
+       do_irradiance_orders=do_irradiance_orders, scattering_step=scattering_step)
+   if (do_irradiance_jacobians .and. .not. do_irradiance) &
+      error stop 'Enable irradiance when requesting its Jacobians.'
+   ! Both angular moments share the native up/down flux solves.
+   do_calculate_flux_at_observer = do_calculate_flux_at_observer .or. do_irradiance
+   do_actinic_flux_jacobians = do_actinic_flux_jacobians .or. do_irradiance_jacobians
+   if (do_irradiance_orders) then
+      if (.not. do_irradiance .or. do_ss_only) error stop 'Orders require full-scattering irradiance.'
+      if (do_deltam_scaling .and. .not. do_rayleigh_only) error stop 'Disable delta-M for scattering orders.'
+      if (scattering_step < 1d-6 .or. scattering_step > 1d-2) error stop 'Invalid scattering-order step.'
+   endif
+
 
 !  Entries in Greekmat
 
@@ -308,6 +330,8 @@ program DRIVER
      MAXLAYERS,                                      & ! Input     
      n_layers, layer_boundary_altitudes) ! Outputs
    ! write(*,*) layer_boundary_altitudes(0:n_layers)
+   call external_observer_to_toa(planet_radius, layer_boundary_altitudes(0), observer_height, &
+      solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle, do_calculate_flux_at_observer)
    layer_thicknesses = layer_boundary_altitudes(0:n_layers) - layer_boundary_altitudes(1:)
 	if (n_layers .gt. MAXLAYERS) then
 		write(*,*) 'Maximum number of layers defined by MSEG_pars.f90 exceeded!'
@@ -520,6 +544,8 @@ program DRIVER
    OPEN(15, FILE=trim(output_path) // 'flux_profile_direct.out', STATUS='replace')
 
    OPEN(20, FILE=trim(output_path) // 'radiances.out', STATUS='replace')
+   if (do_irradiance) call open_irradiance_files(jacobian_list(1:n_jacobians), &
+      do_irradiance_jacobians, do_irradiance_orders)
    
    do q = 1,n_jacobians
 		if (do_radiance_jacobians) then
@@ -824,8 +850,23 @@ program DRIVER
       ! ####################################
       
       if (do_calculate_flux_at_observer) then
+         n_order_values = 2
+         if (do_irradiance_jacobians) n_order_values = 2+2*n_jacobians*n_layers
+         scatter_omega(1:n_layers) = VQS_ModIn%MOptical%OMEGA_TOTAL_INPUT(1:n_layers)
+         scatter_albedo = VQS_FixIn%Optical%LAMBERTIAN_ALBEDO
+         do flux_pass = 0,merge(4,0,do_irradiance_orders)
+            if (flux_pass > 0) then
+               scatter_scale = scattering_step * 2d0**(flux_pass-1)
+               if (flux_pass == 4) scatter_scale = scattering_step/2d0
+               VQS_ModIn%MOptical%OMEGA_TOTAL_INPUT(1:n_layers) = scatter_omega(1:n_layers)*scatter_scale
+               VQS_FixIn%Optical%LAMBERTIAN_ALBEDO = scatter_albedo*scatter_scale
+               ! For an unpolarized Sun, first-order Stokes I depends only on
+               ! P11. Scalar probes avoid nearly degenerate weak-scattering
+               ! vector eigenmodes; the baseline total remains polarized.
+               VQS_FixIn%Cont%nstokes = 1
+            endif
 
-         write(*,*) '  Simulations for actinic flux at observer:'
+         if (flux_pass == 0) write(*,*) '  Simulations for actinic flux at observer:'
 
          ! UPWELLING (nadir view)
          VQS_FixIn%Bool%DO_CALCULATE_FLUXES = .true.
@@ -836,21 +877,45 @@ program DRIVER
 		   VQS_FixIn%Bool%DO_DEBUG_FLUXES       = .true. ! MUST BE TRUE FOR ACTINIC FLUX PROFILE CALCULATIONS!
 
          if (do_actinic_flux_jacobians) then
-            write (*,*) '    Calling linearized VQS master for upwelling radiation.'
+            if (flux_pass == 0) write(*,*) '    Calling linearized VQS master for upwelling radiation.'
             CALL VQS_LP_MASTER ( do_debug_master_input, &
                VQS_FixIn, VQS_ModIn, VQS_Out, &
                VQS_LinFixIn, VQS_LinOut)
             do q = 1, n_jacobians
-               write(50+q, *) VQS_LinOut%Prof%LP_ActFluxDiff(1,1:n_layers,q)*4d0*pi
+               if (flux_pass == 0 .and. observer_height > 0) &
+                  write(50+q, *) VQS_LinOut%Prof%LP_ActFluxDiff(1,1:n_layers,q)*4d0*pi
+               if (do_irradiance_jacobians .and. flux_pass == 0 .and. observer_height > 0) &
+                  write(200+q,*) VQS_LinOut%Prof%LP_RegFluxDiff(1,1:n_layers,q)
             enddo
          else
-            write (*,*) '    Calling non-linearized VQS master for upwelling radiation.'
+            if (flux_pass == 0) write(*,*) '    Calling non-linearized VQS master for upwelling radiation.'
             CALL VQS_MASTER ( do_debug_master_input, &
                VQS_FixIn, VQS_ModIn, VQS_Out )
          endif
          
          ! write (10, '(2X ES22.15E2)') VQS_Out%Main%ActFluxDiff(1)*4d0*pi
-         write (10, *) VQS_Out%Main%ActFluxDiff(1)*4d0*pi      
+         if (flux_pass == 0 .and. observer_height > 0) write(10, *) VQS_Out%Main%ActFluxDiff(1)*4d0*pi
+         if (do_irradiance .and. flux_pass == 0 .and. observer_height > 0) write(21,*) VQS_Out%Main%RegFluxDiff(1)
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_diffuse(1) = VQS_Out%Main%RegFluxDiff(1)
+            else
+               order_samples(1,flux_pass) = VQS_Out%Main%RegFluxDiff(1)
+            endif
+            if (do_irradiance_jacobians) then
+               do q = 1,n_jacobians
+                  do n = 1,n_layers
+                     order_index = 2 + (q-1)*n_layers+n
+                     if (flux_pass == 0) then
+                        order_diffuse(order_index) = VQS_LinOut%Prof%LP_RegFluxDiff(1,n,q)
+                     else
+                        order_samples(order_index,flux_pass) = VQS_LinOut%Prof%LP_RegFluxDiff(1,n,q)
+                     endif
+                  enddo
+               enddo
+            endif
+         endif
+
 
          CALL VQS_WRITE_STATUS ( &
            VQS_ERRUNIT, OPENFILEFLAG, VQS_Out%Status)
@@ -862,16 +927,20 @@ program DRIVER
          VQS_FixIn%UserVal%HEIGHT_CAMERA = observer_height / 1d3 ! Observer height in [km]
          
          if (do_actinic_flux_jacobians) then
-            write (*,*) '    Calling linearized VQS master for downwelling radiation.'
+            if (flux_pass == 0) write(*,*) '    Calling linearized VQS master for downwelling radiation.'
             CALL VQS_LP_MASTER ( do_debug_master_input, &
                VQS_FixIn, VQS_ModIn, VQS_Out, &
                VQS_LinFixIn, VQS_LinOut)
             do q = 1, n_jacobians
-               write(70+q, *) VQS_LinOut%Prof%LP_ActFluxDiff(1,1:n_layers,q)*4d0*pi
-               write(90+q, *) VQS_LinOut%Prof%LP_ActFluxDir(1,1:n_layers,q)*4d0*pi
+               if (flux_pass == 0) write(70+q, *) VQS_LinOut%Prof%LP_ActFluxDiff(1,1:n_layers,q)*4d0*pi
+               if (flux_pass == 0) write(90+q, *) VQS_LinOut%Prof%LP_ActFluxDir(1,1:n_layers,q)*4d0*pi
+               if (do_irradiance_jacobians) then
+                  if (flux_pass == 0) write(300+q,*) VQS_LinOut%Prof%LP_RegFluxDiff(1,1:n_layers,q)
+                  if (flux_pass == 0) write(400+q,*) VQS_LinOut%Prof%LP_RegFluxDir(1,1:n_layers,q)
+               endif
             enddo
          else
-            write (*,*) '    Calling non-linearized VQS master for downwelling radiation.'
+            if (flux_pass == 0) write(*,*) '    Calling non-linearized VQS master for downwelling radiation.'
             CALL VQS_MASTER ( do_debug_master_input, &
                VQS_FixIn, VQS_ModIn, VQS_Out )
          endif
@@ -882,15 +951,89 @@ program DRIVER
          !write (11, '(2X ES22.15E2)') VQS_Out%Main%ActFluxDiff(1)*4d0*p
          !write (12, '(2X ES22.15E2)') VQS_Out%Main%ActFluxDir(1)*4d0*pi
 
-			write (11, *) VQS_Out%Main%ActFluxDiff(1)*4d0*pi
-         write (12, *) VQS_Out%Main%ActFluxDir(1)*4d0*pi
+			if (flux_pass == 0) write(11, *) VQS_Out%Main%ActFluxDiff(1)*4d0*pi
+			if (flux_pass == 0) write(12, *) VQS_Out%Main%ActFluxDir(1)*4d0*pi
+         if (do_irradiance) then
+            if (flux_pass == 0) write(22,*) VQS_Out%Main%RegFluxDiff(1)
+            if (flux_pass == 0) write(23,*) VQS_Out%Main%RegFluxDir(1)
+         endif
          
          !write (*,*) 'Radiance total:', VQS_Out%Main%StokesTot(1)
          !write (*,*) 'Radiance first order:', VQS_Out%Main%StokesFO(1)
          !write (*,*) 'Radiance multiple scattering:', VQS_Out%Main%StokesMS(1)
+         ! At the surface the upward viewing ray has no atmospheric segments,
+         ! so QS leaves its local upward flux empty. Use the exact Lambertian
+         ! boundary condition from the downward flux instead. Atmospheric
+         ! profile derivatives hold surface albedo fixed.
+         if (observer_height == 0) then
+            ground_up = VQS_FixIn%Optical%LAMBERTIAN_ALBEDO * &
+               (VQS_Out%Main%RegFluxDiff(1)+VQS_Out%Main%RegFluxDir(1))
+            if (flux_pass == 0) then
+               write(10,*) 2d0*ground_up
+               if (do_irradiance) write(21,*) ground_up
+               if (do_irradiance_orders) order_diffuse(1) = ground_up
+            else
+               order_samples(1,flux_pass) = ground_up
+            endif
+            if (do_actinic_flux_jacobians) then
+               do q = 1,n_jacobians
+                  ground_up_jac(1:n_layers) = VQS_FixIn%Optical%LAMBERTIAN_ALBEDO * &
+                     (VQS_LinOut%Prof%LP_RegFluxDiff(1,1:n_layers,q)+VQS_LinOut%Prof%LP_RegFluxDir(1,1:n_layers,q))
+                  if (flux_pass == 0) then
+                     write(50+q,*) 2d0*ground_up_jac(1:n_layers)
+                     if (do_irradiance_jacobians) write(200+q,*) ground_up_jac(1:n_layers)
+                  endif
+                  if (do_irradiance_orders .and. do_irradiance_jacobians) then
+                     do n = 1,n_layers
+                        order_index = 2+(q-1)*n_layers+n
+                        if (flux_pass == 0) then
+                           order_diffuse(order_index) = ground_up_jac(n)
+                        else
+                           order_samples(order_index,flux_pass) = ground_up_jac(n)
+                        endif
+                     enddo
+                  endif
+               enddo
+            endif
+         endif
          
+
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_diffuse(2) = VQS_Out%Main%RegFluxDiff(1)
+            else
+               order_samples(2,flux_pass) = VQS_Out%Main%RegFluxDiff(1)
+            endif
+            if (do_irradiance_jacobians) then
+               do q = 1,n_jacobians
+                  do n = 1,n_layers
+                     order_index = 2 + n_jacobians*n_layers + (q-1)*n_layers+n
+                     if (flux_pass == 0) then
+                        order_diffuse(order_index) = VQS_LinOut%Prof%LP_RegFluxDiff(1,n,q)
+                     else
+                        order_samples(order_index,flux_pass) = VQS_LinOut%Prof%LP_RegFluxDiff(1,n,q)
+                     endif
+                  enddo
+               enddo
+            endif
+         endif
+
+         if (do_irradiance_orders) then
+            if (flux_pass == 0) then
+               order_direct = VQS_Out%Main%RegFluxDir(1)
+            else
+               if (abs(VQS_Out%Main%RegFluxDir(1)-order_direct) > 1d-10+1d-8*abs(order_direct)) &
+                  error stop 'Direct irradiance changed during fixed-extinction scattering expansion.'
+            endif
+         endif
+         enddo
+         VQS_ModIn%MOptical%OMEGA_TOTAL_INPUT(1:n_layers) = scatter_omega(1:n_layers)
+         VQS_FixIn%Optical%LAMBERTIAN_ALBEDO = scatter_albedo
+         VQS_FixIn%Cont%nstokes = n_stokes
+         if (do_irradiance_orders) call write_irradiance_orders( &
+            order_samples(1:n_order_values,:), order_diffuse(1:n_order_values), &
+            scattering_step, n_layers, n_jacobians, do_irradiance_jacobians)
       endif
-      
       ! ###############################
       ! Calculate actinic flux profiles
       ! ###############################
@@ -944,6 +1087,7 @@ program DRIVER
    Close(14)
    Close(15)
    Close(20)
+   if (do_irradiance) call close_irradiance_files(n_jacobians, do_irradiance_jacobians, do_irradiance_orders)
    do q = 1, n_jacobians
       if (do_radiance_jacobians) then
 			Close(30+q)

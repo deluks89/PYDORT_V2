@@ -22,7 +22,9 @@ subroutine ReadConfigfile (configfile,                                     & ! I
        observer_height,                                                    & ! Viewing geometry
        solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle,   & ! Viewing geometry
        do_radiance_jacobians, do_actinic_flux_jacobians,                   & ! Jacobian control
-       backend_mode, sphericity_interpolation_points)                        ! Optional backend control
+       backend_mode, sphericity_interpolation_points, &
+       do_irradiance, do_irradiance_jacobians, &
+       do_irradiance_orders, scattering_step)                        ! Optional backend/output control
 
 
    implicit none
@@ -62,6 +64,11 @@ subroutine ReadConfigfile (configfile,                                     & ! I
    real(kind=fpk), intent(out) :: viewing_zenith_angle
    real(kind=fpk), intent(out) :: relative_azimuth_angle
    character(len=*), optional, intent(out) :: backend_mode
+   logical, optional, intent(out) :: do_irradiance, do_irradiance_jacobians
+   logical, optional, intent(out) :: do_irradiance_orders
+   real(kind=fpk), optional, intent(out) :: scattering_step
+   character(len=40) :: mode_read
+   integer :: points_read, config_status
 
 
 !  Initialize everything
@@ -85,6 +92,10 @@ subroutine ReadConfigfile (configfile,                                     & ! I
    solar_zenith_angle = 0.0_fpk
    if (present(backend_mode)) backend_mode = 'vlidort_qs'
    if (present(sphericity_interpolation_points)) sphericity_interpolation_points = 3
+   if (present(do_irradiance)) do_irradiance = .false.
+   if (present(do_irradiance_jacobians)) do_irradiance_jacobians = .false.
+   if (present(do_irradiance_orders)) do_irradiance_orders = .false.
+   if (present(scattering_step)) scattering_step = 1d-3
 
 !  Read the configuration file
 !  ===========================
@@ -126,8 +137,33 @@ subroutine ReadConfigfile (configfile,                                     & ! I
 
    read(1,*) do_radiance_jacobians
    read(1,*) do_actinic_flux_jacobians
-   if (present(backend_mode)) read(1,*) backend_mode
-   if (present(sphericity_interpolation_points)) read(1,*) sphericity_interpolation_points
+   ! Consume optional trailing records even when the caller does not need
+   ! backend routing. EOF keeps old 16/18-record input files compatible.
+   read(1,*,iostat=config_status) mode_read
+   if (config_status > 0) error stop 'Invalid backend configuration'
+   if (config_status == 0) then
+      if (present(backend_mode)) backend_mode = mode_read
+      read(1,*,iostat=config_status) points_read
+      if (config_status > 0) error stop 'Invalid spherical-correction configuration'
+      if (config_status == 0 .and. present(sphericity_interpolation_points)) &
+         sphericity_interpolation_points = points_read
+   endif
+   if (config_status == 0 .and. present(do_irradiance)) then
+      read(1,*,iostat=config_status) do_irradiance
+      if (config_status > 0) error stop 'Invalid irradiance configuration'
+   endif
+   if (config_status == 0 .and. present(do_irradiance_jacobians)) then
+      read(1,*,iostat=config_status) do_irradiance_jacobians
+      if (config_status > 0) error stop 'Invalid irradiance Jacobian configuration'
+   endif
+   if (config_status == 0 .and. present(do_irradiance_orders)) then
+      read(1,*,iostat=config_status) do_irradiance_orders
+      if (config_status > 0) error stop 'Invalid irradiance scattering-order configuration'
+   endif
+   if (config_status == 0 .and. present(scattering_step)) then
+      read(1,*,iostat=config_status) scattering_step
+      if (config_status > 0) error stop 'Invalid irradiance scattering step'
+   endif
 
 
    close(1)
