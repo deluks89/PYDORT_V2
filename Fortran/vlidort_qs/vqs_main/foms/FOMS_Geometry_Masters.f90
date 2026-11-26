@@ -602,8 +602,13 @@ subroutine FOMS_sphergeom_Initial                                       &
             losp1(s) = ct1 ; hsegs(s) = ht
             ston1(s) = nCamera ; sud1(s) = .true.
             s = s + 1
-            sina(s) = salpha1
-            cosa(s) = calpha1
+!  The far-side endpoint is the layer TOP, not the camera altitude.
+!  Reusing the camera angle here made radius/angle/path inconsistent for
+!  an interior-layer observer, and transferred part of this layer's path
+!  to the layer above. Update ct1 for the subsequent outward traversal.
+            sina(s) = Raycon / radii(nCamera-1)
+            cosa(s) = sqrt(one-sina(s)*sina(s))
+            ct1 = radii(nCamera-1)*cosa(s)
             losp1(s) = ct1 ; hsegs(s) = heights(nCamera-1)
             ston1(s) = nCamera ; sud1(s) = .false.
          endif

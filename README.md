@@ -41,42 +41,41 @@ to QS with a warning, rather than silently rounding the observer height or
 returning NaNs. At VZA 89 degrees on Earth, the surface-intersection limit is
 approximately 970 m. The comparison tables record the resolved backend and
 `fallback_reason`; these rows are QS results, not aircraft interpolation results.
-Surface-missing, downward-looking limb rays also require QS for spherical FO.
+Correction 1 also falls back to QS for surface-missing downward-looking rays.
+Experimental correction 0 handles sunlit limb rays natively.
 
 ## Experimental Aircraft Approximation
 
 ```python
 pyd.settings_rt.sphericity_correction = 0
-pyd.settings_rt.n_aircraft_source_points = 5  # integer, 2 through 33
+pyd.settings_rt.n_aircraft_source_points = 3  # default; integer, 2 through 33
 pyd.run_rt()
 ```
 
 Implemented in `Fortran/vlidort_standard/sparse_aircraft.f90`, this method
-samples local pseudo-spherical VLIDORT MS solutions at a small number of
-geometries along the observer ray. For each layer it divides the integrated
-source by `1-exp(-tau/mu)` before interpolating in `log(mu)`. Here `tau` is
-the delta-M-scaled vertical optical depth and `mu` the viewing cosine.
-This removes much of the near-horizon path-length dependence responsible
-for the original AC interpolation bias. The normalized sources are then
-integrated using spherical shell intersections and exact segment transmission,
-with a piecewise-constant effective source within each intersected layer.
-Nodes are geometry-based, not adaptively chosen from a radiance error estimate.
+samples local pseudo-spherical MS solutions at a small number of geometries
+along the observer ray. It reuses those solutions to integrate the varying
+source along each spherical chord. Adaptive Gaussian quadrature evaluates
+only the existing source expansion; it does not add complete MS solves.
+Angular source interpolation is quadratic with three or more points (linear
+with two), using actual local viewing cosines rather than layer-averaged ones.
+The sample range remains continuous when a second ray leg appears at 90 degrees.
 
-Spherical first-order scattering remains enabled and is evaluated separately
-along the observer ray. Native LPS source derivatives are propagated through
-normalization, interpolation and transmission analytically. No finite-difference
-Jacobian replacement is used. For aerosol delta-M calculations, the FO helper
-uses a full local solve to retain consistent scaled extinction; its MS output
-is discarded. This adds some overhead.
+Spherical FO and its Jacobians are evaluated directly inside the Standard/AC
+executable. Sparse MS samples use the QS separated kernels, sharing
+homogeneous work and BVP factorization across both legs. No QS master or QS
+fine-geometry MS sweep is called. Python launches **one Fortran driver per
+simulation**, including all wavelengths. Optical derivatives of the source
+and curved integration weights are analytic. Partial observer/tangent layers
+are integrated on the original atmosphere grid, without creating thin layers.
 
-Supported radiance geometries include upward-looking rays (`0 <= VZA < 90`)
-even when their backward extension misses the surface, and surface-intersecting
-downward-looking rays (`90 < VZA <= 180`). Observers may lie between layer
-boundaries. Exactly horizontal and downward-looking turning rays currently
-fall back to QS with a warning. Twilight local-source geometries are rejected.
-The atmosphere is horizontally uniform and refraction is not included.
-Observer fluxes retain the native pseudo-spherical flux calculation; this
-line-of-sight correction is not an angularly integrated flux correction.
+Supported sunlit radiance geometries include upward-looking, horizontal,
+turning limb, and surface-intersecting downward-looking rays. Observers may
+lie between layer boundaries. Turning paths include both legs, with no
+artificial reflecting surface at the tangent. Twilight local-source geometries
+are rejected. The atmosphere is horizontally uniform; refraction is not included.
+Observer actinic flux and irradiance retain the native pseudo-spherical flux
+calculation; this line-of-sight correction does not apply to angular integrals.
 
 The five-point Rayleigh test at 477 nm, 100 m, SZA=60, VZA=89 reduces radiance
 error relative to QS from about 11.1% (old AC) to 0.0008%, and O4 SCD error
@@ -85,9 +84,15 @@ not accuracy guarantees. At 15 km, SZA=60, VZA=85 the radiance is extremely
 close to QS but the O4 SCD differs by about -5.4%, worse than old AC in that
 case. Angular-stream and vertical-grid convergence remain important.
 Increasing source points alone does not guarantee closer agreement with QS.
-Runtime grows with point count and is not always lower than QS, particularly
-at high altitude or for short downward-looking paths. Treat this as an
+Runtime grows with point count, although common solver work is now shared.
+The timing comparisons below apply to their tested configurations. Treat this as an
 experimental intermediate approximation, not a generally validated QS replacement.
+
+The previous low-altitude horizon bias and sampling discontinuity motivated
+the curved-source implementation. It retains three angular points by default
+while substantially improving horizon radiances and aerosol Jacobians in the
+validation cases. See the validation notes for accuracy, timing and remaining
+approximation limits; the FO-only curvature baseline is defined there.
 
 Reproducible Spyder-style comparisons and native-derivative checks:
 
@@ -104,6 +109,28 @@ backend, O4 SCDs, radiances and timings in `Examples/testing/sparse_aircraft_res
 They omit unsupported old-AC cases rather than mislabeling QS fallbacks.
 Tests use temporary backend folders and leave normal simulation files untouched.
 
+## Combined AC validation
+
+The combined driver is selected with correction 0. Its sparse MS samples now
+share the QS separated homogeneous solution and BVP factorization across both
+viewing-ray legs, once per Fourier order. Beam-dependent solves still run per
+sample; AC retains its own angular-source interpolation and curved-path
+quadrature. The default remains three points per leg and one Python driver
+call for a complete radiance simulation. More points can therefore reuse the
+expensive common work without repeating a full Standard master call.
+
+Compare it with full QS
+and spherical FO plus ordinary local Standard MS using:
+
+```sh
+python validation/validate_combined_ac.py --points 3 5 --public-api
+```
+
+See [the implementation and validation notes](validation/README.md) for
+accuracy, timing, finite-difference checks, and limitations. The older
+`aircraft_limb_ms` and `aircraft_limb_raw` modes remain MS-only research
+interfaces for component comparisons; they are not the public combined path.
+
 ## Build
 
 The copied Fortran sources can be built from the shared Fortran entry point:
@@ -114,17 +141,26 @@ mingw32-make
 ```
 
 The common makefile builds the QS driver, the Standard/AC driver, and the Mie
-model. The validated Standard/AC build uses gfortran and binary128 arithmetic
-(`-freal-8-real-16`) throughout the driver, core, and bundled LAPACK routines.
-This prevents catastrophic cancellation in native LPS Jacobians near conservative
-scattering. The adapter also uses an ASYMTX tolerance of `1e-28`: `1e-20`
-still left errors in conservative polarized calculations. The existing native
-SSA limiter is unchanged; no background absorption is added, and the Jacobians
-are not replaced by finite differences. QS and Mie are unchanged.
+model. Standard/AC uses double precision (binary64) by default throughout the
+driver, core, first-order calculation, and bundled LAPACK routines. QS and Mie
+are unchanged. The precision benchmark found essentially unchanged radiances
+and small localized Jacobian differences, with a substantial speed improvement.
+See [precision validation](validation/README.md#standard-binary64-versus-binary128-2026-11-25).
 
-The makefile rebuilds all Standard/AC objects after changes to dimensions,
-type definitions, or the makefile. When overriding compiler flags on the command
-line, also use `-B`; mixing precision settings between objects is invalid.
+An optional gfortran quadruple-precision reference build is available:
+
+```sh
+cd Fortran/vlidort_standard
+mingw32-make -B PRECISION=quadruple
+# Restore the default:
+mingw32-make -B PRECISION=double
+```
+
+Always use `-B` when changing precision or overriding compiler flags; mixing
+precision settings between objects is invalid. Changes to the makefile,
+dimensions, or type definitions also trigger a full Standard/AC rebuild.
+The ASYMTX tolerance remains `1e-28`, and the native SSA limiter is unchanged;
+no background absorption is added and native Jacobians remain analytic.
 Other compiler configurations have not been validated for conservative Jacobians.
 
 ## Jacobian regression
@@ -283,7 +319,7 @@ Standard uses a Fourier convergence tolerance of `1e-9`; the active QS Mark3
 forward/profile solvers retain `1e-12`. Both require two successive converged
 terms for aerosol calculations. These settings remove a reproduced SC AOD-sweep
 outlier and improve aerosol Jacobian convergence. They can increase runtime,
-particularly for Standard's binary128 calculations. This is a Fourier stopping
+particularly for optional binary128 Standard calculations. This is a Fourier stopping
 criterion, not a guarantee of `1e-12` accuracy of the complete RT solution.
 The matched tolerance benchmark found `1e-9` adequate for Standard SC with an
 8–9% runtime saving versus `1e-12`. QS optical-aerosol Jacobians changed by up

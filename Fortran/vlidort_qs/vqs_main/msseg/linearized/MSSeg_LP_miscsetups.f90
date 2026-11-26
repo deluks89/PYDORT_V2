@@ -394,9 +394,10 @@
 
 !  Initialize outputs
 
-      LP_T_DELT_MUBAR   = ZERO
-      LP_INITIAL_TRANS  = ZERO
-      LP_AVERAGE_SECANT = ZERO
+!  Initialize the active workspace only; unused capacity is never consumed.
+      LP_T_DELT_MUBAR(1:NLAYERS,1:NLAYERS,1:NBEAMS,:) = ZERO
+      LP_INITIAL_TRANS(1:NLAYERS,1:NLAYERS,1:NBEAMS,:) = ZERO
+      LP_AVERAGE_SECANT(1:NLAYERS,1:NLAYERS,1:NBEAMS,:) = ZERO
 
 !  linearization of Initial transmittances (Profile linearization)
 !  =======================================

@@ -21,6 +21,7 @@ __pycache__/
 
 # Compiler logs, editor backups, and desktop metadata
 /Fortran/**/build*.log
+/Fortran/*/build_logs/
 *~
 .directory
 *.lnk

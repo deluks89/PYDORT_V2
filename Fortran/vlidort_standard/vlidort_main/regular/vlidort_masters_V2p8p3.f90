@@ -2388,7 +2388,7 @@
 
 !  11/20/23. Version 2.8.3. replace DO_MSSTS with DO_SPHERICITY_CORRECTION
 
-      IF ( DO_SPHERICITY_CORRECTION ) THEN
+      IF ( DO_SPHERICITY_CORRECTION .and. SPHERCORR_TYPE.ne.'S' ) THEN
          VLIDORT_Out%Main%TS_PATHGEOMS  (1,0:NLAYERS)                      = FO_THETA_ALL  (0:NLAYERS,1)
          VLIDORT_Out%Main%TS_PATHGEOMS  (2,0:NLAYERS)                      = FO_ALPHA      (0:NLAYERS,1)
          IF ( DO_UPWELLING ) THEN

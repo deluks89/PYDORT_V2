@@ -3141,7 +3141,8 @@
 !    -- Sphericity correction type must be set properly
 !    -- 3-point weighting factor must be between zero and one
 
-        IF ( SPHERCORR_TYPE.eq.'2' .or. SPHERCORR_TYPE.eq.'3' .or. SPHERCORR_TYPE.eq.'M' ) THEN
+        IF ( SPHERCORR_TYPE.eq.'2' .or. SPHERCORR_TYPE.eq.'3' .or. &
+             SPHERCORR_TYPE.eq.'M' .or. SPHERCORR_TYPE.eq.'S' ) THEN
           IF ( SPHERCORR_TYPE.eq.'3' ) THEN
             IF ( SPHERCORR_3PTFACTOR .ge. one .or.SPHERCORR_3PTFACTOR.le.zero ) then
               NM = NM + 1 ;STATUS = VLIDORT_SERIOUS
@@ -3182,7 +3183,15 @@
           ACTIONS(NM)  = 'Check DO_OBSERVATION_GEOMETRY flag'
         ENDIF
 
-        IF ( .NOT. DO_FOCORR .or. (DO_FOCORR.and..not.DO_FOCORR_OUTGOING) ) THEN
+        ! S is a source-only batch: its caller integrates the true LOS and
+        ! supplies FO separately. It must not compute unused local FO paths.
+        IF ( SPHERCORR_TYPE.eq.'S' ) THEN
+          IF (.not.DO_FOCORR_EXTERNAL.or..not.DO_FOCORR) THEN
+            NM=NM+1; STATUS=VLIDORT_SERIOUS
+            MESSAGES(NM)='Source-only sphericity mode requires external FO'
+            ACTIONS(NM)='Set DO_FOCORR and DO_FOCORR_EXTERNAL'
+          ENDIF
+        ELSE IF ( .NOT. DO_FOCORR .or. (DO_FOCORR.and..not.DO_FOCORR_OUTGOING) ) THEN
           NM = NM + 1 ; STATUS = VLIDORT_SERIOUS
           MESSAGES(NM) = 'Bad input: FOCORR OUTGOING flags must be set for Sphericity Correction'
           ACTIONS(NM)  = 'Reset DO_FOCORR and/or DO_FOCORR_OUTGOING flags'

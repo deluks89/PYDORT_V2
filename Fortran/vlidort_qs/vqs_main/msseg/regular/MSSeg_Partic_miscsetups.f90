@@ -275,7 +275,8 @@
 !  Slant optical thickness values
 
 !mick fix 7/23/2014 - initialized for packing
-      DELTAU_SLANT = ZERO
+!  Initialize the active workspace only; unused capacity is never consumed.
+      DELTAU_SLANT(1:NLAYERS,1:NLAYERS,1:NBEAMS) = ZERO
 
       DO IB = 1, NBEAMS
         DO N = 1, NLAYERS
@@ -559,7 +560,8 @@
 
 !  initialise output
 
-      CHAPMAN_FACTORS = ZERO
+!  Initialize the active workspace only; unused capacity is never consumed.
+      CHAPMAN_FACTORS(1:NLAYERS,1:NLAYERS,1:N_SZANGLES) = ZERO
 
 !  earth radii and heights differences
 

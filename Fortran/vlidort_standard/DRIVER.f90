@@ -16,6 +16,7 @@ program DRIVER
    use VLIDORT_LPS_SPHERCORR_ROUTINES_m
    use VLIDORT_AC_SPHERCORR_ROUTINES_m
    use VLIDORT_AC_LPS_SPHERCORR_ROUTINES_m
+   use aircraft_fo_m, only: aircraft_first_order
    use sparse_aircraft_m
    use VLIDORT_L_INPUTS_m, only : VLIDORT_L_INIT_INPUTS, VLIDORT_LinSup_Init
 
@@ -45,7 +46,7 @@ program DRIVER
    real(fpk) :: order_samples(2+2*MAX_ATMOSWFS*MAXLAYERS,4)
    real(fpk) :: order_diffuse(2+2*MAX_ATMOSWFS*MAXLAYERS)
 
-   logical :: do_sphericity_correction, do_aircraft_correction, do_sparse_aircraft
+   logical :: do_sphericity_correction, do_aircraft_correction, do_sparse_aircraft, do_limb_ms, do_combined_ac
    logical :: fail, twilight_flag
    integer :: n_stokes, n_streams, n_fine_layers, sphercorr_points
    integer :: n_wavelengths, n_layers, n_aertypes, n_gases, n_jacobians
@@ -131,7 +132,15 @@ program DRIVER
    endif
 
    call decode_backend_mode(backend_mode, do_sphericity_correction, do_aircraft_correction)
-   do_sparse_aircraft = trim(backend_mode) == 'aircraft_sparse'
+   do_limb_ms = trim(backend_mode) == 'aircraft_limb_ms' .or. trim(backend_mode) == 'aircraft_limb_raw'
+   do_combined_ac = trim(backend_mode) == 'aircraft_combined' .or. trim(backend_mode) == 'standard_native_fo'
+   do_sparse_aircraft = trim(backend_mode) == 'aircraft_sparse' .or. do_limb_ms .or. do_combined_ac
+   if (do_limb_ms) then
+      if (do_calculate_flux_at_observer .or. do_calculate_flux_profiles) &
+         error stop 'aircraft_limb_ms is a radiance-only research mode'
+      if (do_ss_only) error stop 'aircraft_limb_ms returns MS only'
+      write(*,*) 'Research limb mode: radiance output contains MULTIPLE SCATTERING ONLY.'
+   endif
    solver_vza = min(viewing_zenith_angle, 180.0_fpk - viewing_zenith_angle)
    if (do_ss_only) then
       do_sphericity_correction = .false.
@@ -151,6 +160,8 @@ program DRIVER
    call ReadArrayFromFile('INPUT/wavelengths.inp', MAX_WAVELENGTHS, 1, &
       n_wavelengths, dummy_integer, simulated_wavelengths)
    call ReadVerticalGrid('INPUT/vertical_grid.inp', MAXLAYERS, n_layers, layer_boundary_altitudes)
+   if (do_limb_ms .and. observer_height > layer_boundary_altitudes(0)) &
+      error stop 'aircraft_limb_ms requires an observer at or below TOA'
    call external_observer_to_toa(planet_radius, layer_boundary_altitudes(0), observer_height, &
       solar_zenith_angle, viewing_zenith_angle, relative_azimuth_angle, do_calculate_flux_at_observer)
    solver_vza = min(viewing_zenith_angle, 180.0_fpk - viewing_zenith_angle)
@@ -808,8 +819,81 @@ contains
    subroutine run_sparse_aircraft(linearized,stokes,profile)
       logical, intent(in) :: linearized
       real(fpk), intent(out) :: stokes(4), profile(MAX_ATMOSWFS,MAXLAYERS)
-      real(fpk) :: ms(4), ms_jac(MAX_ATMOSWFS,MAXLAYERS,4)
+      real(fpk) :: ms(4), ms_jac(MAX_ATMOSWFS,MAXLAYERS,4), fo_jac(MAX_ATMOSWFS,MAXLAYERS,4)
+      integer(kind=8) :: tick0,tick1,tick2,rate
+      logical :: misses
 
+      if (do_combined_ac) then
+         call system_clock(tick0,rate)
+         call aircraft_first_order(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_LinFixIn,linearized, &
+            obs_height_clamped/1000.0_fpk,solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle, &
+            n_fine_layers,.not.do_ss_only,stokes,fo_jac)
+         profile=fo_jac(:,:,1)
+         call system_clock(tick1)
+         if (.not.do_ss_only) then
+            ! A ray tangent to BOA still has an atmospheric incoming limb.
+            ! Include equality so a horizontal surface observer retains MS.
+            misses=(planet_radius+obs_height_clamped/1000.0_fpk)* &
+               sin(viewing_zenith_angle*acos(-ONE)/180.0_fpk) >= &
+               planet_radius+layer_boundary_altitudes(n_layers)/1000.0_fpk
+            if (trim(backend_mode) == 'standard_native_fo') then
+               ! Validation baseline: exact native spherical FO plus ordinary
+               ! local plane-parallel LOS MS (pseudo-spherical solar beam).
+               call configure_radiance_geometry(output_diridx)
+               VLIDORT_ModIn%MBool%TS_DO_FOCORR=.true.
+               VLIDORT_ModIn%MBool%TS_DO_FOCORR_EXTERNAL=.true.
+               VLIDORT_ModIn%MBool%TS_DO_FOCORR_OUTGOING=.false.
+               VLIDORT_ModIn%MUserVal%TS_USER_OBSGEOMS_INPUT(1,2)=min(solver_vza,89.99999_fpk)
+               VLIDORT_Sup%SS%TS_STOKES_SS=ZERO; VLIDORT_Sup%SS%TS_STOKES_DB=ZERO
+               VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_SS=ZERO; VLIDORT_LinSup%SS%Prof%TS_PROFILEWF_DB=ZERO
+               ms_jac=ZERO
+               if (linearized) then
+                  call VLIDORT_LPS_MASTER(.false.,VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_Out, &
+                     VLIDORT_LinFixIn,VLIDORT_LinModIn,VLIDORT_LinSup,VLIDORT_LinOut)
+                  ms_jac(:,:,1)=VLIDORT_LinOut%Prof%TS_PROFILEWF(:,:,1,1,1,output_diridx)
+               else
+                  call VLIDORT_MASTER(.false.,VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_Out)
+               endif
+               if (VLIDORT_Out%Status%TS_STATUS_INPUTCHECK/=VLIDORT_SUCCESS.or. &
+                   VLIDORT_Out%Status%TS_STATUS_CALCULATION/=VLIDORT_SUCCESS) then
+                  write(*,*) trim(VLIDORT_Out%Status%TS_CHECKMESSAGES(1)),trim(VLIDORT_Out%Status%TS_MESSAGE)
+                  error stop 'Standard native FO baseline failed'
+               endif
+               ms=VLIDORT_Out%Main%TS_STOKES(1,1,:,output_diridx)
+            else if (misses) then
+               call limb_aircraft_ms(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_LinFixIn, &
+                  VLIDORT_LinModIn,VLIDORT_LinSup,linearized,obs_height_clamped/1000.0_fpk, &
+                  solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle,sphercorr_points,ms,ms_jac)
+            else
+               call sparse_aircraft_ms(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_LinFixIn, &
+                  VLIDORT_LinModIn,VLIDORT_LinSup,linearized,obs_height_clamped/1000.0_fpk, &
+                  solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle,sphercorr_points,ms,ms_jac)
+            endif
+            stokes=stokes+ms
+            profile=profile+ms_jac(:,:,1)
+         endif
+         call system_clock(tick2)
+         write(*,*) 'AC native seconds FO/MS:',real(tick1-tick0,fpk)/real(rate,fpk), &
+            real(tick2-tick1,fpk)/real(rate,fpk)
+         return
+      endif
+
+      ! Research-only native mode. Outputs contain MS, not total radiance.
+      ! QS supplies FO in the validation harness; public routing is unchanged.
+      if (do_limb_ms) then
+         if (trim(backend_mode) == 'aircraft_limb_raw') then
+            call sparse_aircraft_ms(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_LinFixIn, &
+               VLIDORT_LinModIn,VLIDORT_LinSup,linearized,obs_height_clamped/1000.0_fpk, &
+               solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle,sphercorr_points,ms,ms_jac,.true.)
+         else
+         call limb_aircraft_ms(VLIDORT_FixIn,VLIDORT_ModIn,VLIDORT_Sup,VLIDORT_LinFixIn, &
+            VLIDORT_LinModIn,VLIDORT_LinSup,linearized,obs_height_clamped/1000.0_fpk, &
+            solar_zenith_angle,viewing_zenith_angle,relative_azimuth_angle,sphercorr_points,ms,ms_jac)
+         endif
+         stokes = ms
+         profile = ms_jac(:,:,1)
+         return
+      endif
       call configure_radiance_geometry(output_diridx)
       call prepare_standard_first_order(linearized)
       stokes = VLIDORT_Sup%SS%TS_STOKES_SS(1,1,:,output_diridx)

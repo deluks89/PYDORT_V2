@@ -915,8 +915,9 @@ class SettingsRT(FrozenContainer):
     sphericity_correction: int, default is 1.
         Selects the spherical-correction accuracy and the Fortran backend:
         0 uses experimental sparse, transmission-normalized aircraft MS sources.
-        This supports upward-looking rays without a surface extension and
-        surface-intersecting downward-looking rays. Turning rays use QS.
+        Native spherical FO and batched Standard MS share one driver call.
+        Supports sunlit limb/turning rays and observers between layer boundaries;
+        it remains an approximation, especially near the low-altitude horizon.
         1 uses Standard VLIDORT with spherical first-order scattering but
         no multiple-scattering spherical correction, 2 uses the
         2-point interpolated correction, 3 uses the 3-point interpolated
@@ -950,7 +951,7 @@ class SettingsRT(FrozenContainer):
         If True, the contribution from multiply scattered light is omitted.
     n_full_sphericity_fine_layers: int, default is 4.
         Subdivision of atmospheric layers used by full-sphericity calculations.
-    n_aircraft_source_points: int, default is 5.
+    n_aircraft_source_points: int, default is 3.
         Number of local MS solutions for experimental correction 0 (2 to 33).
     jacobian_layer_flags: String ('all') or list of booleans with length equal to the number of profile layers.
         Limits the jacobian calculation to distinct layers to improve computational efficiency.
@@ -981,7 +982,7 @@ class SettingsRT(FrozenContainer):
                           'do_single_scattering_only',
                           'n_full_sphericity_fine_layers'])
         self.sphericity_correction = SphericityCorrection.NONE.value
-        self.n_aircraft_source_points = 5
+        self.n_aircraft_source_points = 3
         self.do_actinic_flux_at_observer = False
         self.do_irradiance_at_observer = False
         self.do_irradiance_jacobians = False
@@ -3433,14 +3434,9 @@ class Pydort(VerticalGrid):
         misses_surface = ray_radius >= radius + grid[0]
 
         if correction == SphericityCorrection.EXPERIMENTAL.value:
-            if self.settings_rt.do_radiance:
-                if vza > 90 and misses_surface:
-                    return qs_fallback('experimental sparse-source correction does not yet support turning rays')
-                if vza == 90:
-                    return qs_fallback('experimental sparse-source correction does not yet support exactly horizontal rays')
             return {
                 'model': RadiativeTransferModel.AIRCRAFT.value,
-                'backend_mode': 'aircraft_sparse',
+                'backend_mode': 'aircraft_combined',
                 'sphericity_interpolation_points': self.settings_rt.n_aircraft_source_points,
             }
 

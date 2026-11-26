@@ -1,6 +1,8 @@
 # Build for copied Standard VLIDORT 2.8.3 and VLIDORT-AC sources.
 
 FC = gfortran
+# Use -B when changing PRECISION so every compilation unit is rebuilt.
+PRECISION ?= double
 .DEFAULT_GOAL := all
 
 MOD_PATH = mod
@@ -15,10 +17,13 @@ SUPPORT_PATH = ../driver_support
 FFLAGS = -c -O2
 LDFLAGS = -static
 ifeq ($(FC), gfortran)
-	# Conservative Rayleigh LPS derivatives lose precision in binary64.
-	# Promote EVERY compilation unit, including the bundled LAPACK and driver,
-	# so all module interfaces use the same binary128 arithmetic.
-	FFLAGS := $(FFLAGS) -Wall -fno-automatic -freal-8-real-16 -I$(MOD_PATH) -J$(MOD_PATH)
+	FFLAGS := $(FFLAGS) -Wall -fno-automatic -I$(MOD_PATH) -J$(MOD_PATH)
+ifeq ($(PRECISION), quadruple)
+	# Optional reference: promote driver, core, FO and LAPACK together.
+	FFLAGS := $(FFLAGS) -freal-8-real-16
+else ifneq ($(PRECISION), double)
+	$(error PRECISION must be double or quadruple)
+endif
 	LDFLAGS := $(LDFLAGS) -Wl,--stack,536870912
 endif
 
@@ -122,12 +127,49 @@ LINEARIZED_SOURCES = \
 
 REGULAR_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(REGULAR_SOURCES)))
 LINEARIZED_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(LINEARIZED_SOURCES)))
+# Shared native geometry/FO and separated MS kernels; no QS master or LOS quadrature.
+QS_PATH = ../vlidort_qs
+FO_SHARED_SOURCES = \
+	aircraft_fo_pars.f90 \
+	$(QS_PATH)/vqs_main/foms/FOMS_Geometry_Routines.f90 \
+	$(QS_PATH)/vqs_main/foms/FOMS_Geometry_Masters.f90 \
+	$(QS_PATH)/vqs_main/foms/FOMS_VectorSpherfuncs.f90 \
+	$(QS_PATH)/vqs_main/foms/FOMS_FO_VectorRT.f90 \
+	$(QS_PATH)/vqs_main/foms/FOMS_FO_LP_VectorRT.f90
+FO_SHARED_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(FO_SHARED_SOURCES)))
+
+# QS separated MS kernels; AC supplies sparse geometries and its own LOS integration.
+MS_SHARED_SOURCES = \
+	aircraft_ms_pars.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_aux.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_HPTypes.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Homog_miscsetups.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Homog_solutions.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Homog_bvproblem.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Homog_Fourier.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Partic_miscsetups.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Partic_solutions.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Partic_bvproblem.f90 \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_Partic_PostProcess.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_L_HPTypes.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LA_miscsetups.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LA_solutions.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LA_Fourier.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LP_miscsetups.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LP_solutions.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LP_bvproblem.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_LP_PostProcess.f90 \
+	aircraft_chord_quadrature.f90 \
+	aircraft_ms_sources.f90
+MS_SHARED_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(MS_SHARED_SOURCES)))
+
 DRIVER_SOURCES = \
 	$(SUPPORT_PATH)/DRIVER_pars.f90 \
 	$(SUPPORT_PATH)/MainDriverUtility.f90 \
 	$(SUPPORT_PATH)/ReadInputData.f90 \
 	$(SUPPORT_PATH)/RayleighScattering.f90 \
 	sparse_aircraft.f90 \
+	aircraft_fo.f90 \
 	DRIVER.f90
 DRIVER_OBJECTS = $(patsubst %.f90,$(OBJ_PATH)/%.o,$(notdir $(DRIVER_SOURCES)))
 MOD_FILES = $(MOD_PATH)/*.mod
@@ -141,8 +183,8 @@ regular: $(REGULAR_OBJECTS)
 
 linearized: regular $(LINEARIZED_OBJECTS)
 
-driver: linearized $(DRIVER_OBJECTS)
-	$(FC) $(OBJ_FILES) $(LDFLAGS) -o DRIVER.exe
+driver: linearized $(FO_SHARED_OBJECTS) $(MS_SHARED_OBJECTS) $(DRIVER_OBJECTS)
+	$(FC) $(REGULAR_OBJECTS) $(LINEARIZED_OBJECTS) $(FO_SHARED_OBJECTS) $(MS_SHARED_OBJECTS) $(DRIVER_OBJECTS) $(LDFLAGS) -o DRIVER.exe
 
 # Dimension/type or build-option changes require a consistent full rebuild.
 # For command-line FFLAGS overrides, use -B as well.
@@ -172,7 +214,27 @@ $(OBJ_PATH)/%.o: $(SUPPORT_PATH)/%.f90 | $(MOD_PATH) $(OBJ_PATH)
 $(OBJ_PATH)/%.o: %.f90 | $(MOD_PATH) $(OBJ_PATH)
 	$(FC) $(FFLAGS) $< -o $@
 
-$(OBJ_PATH)/DRIVER.o: $(OBJ_PATH)/sparse_aircraft.o
+$(OBJ_PATH)/%.o: $(QS_PATH)/vqs_def/%.f90 | $(MOD_PATH) $(OBJ_PATH)
+	$(FC) $(FFLAGS) $< -o $@
+
+$(OBJ_PATH)/%.o: $(QS_PATH)/vqs_main/foms/%.f90 | $(MOD_PATH) $(OBJ_PATH)
+	$(FC) $(FFLAGS) $< -o $@
+
+$(FO_SHARED_OBJECTS): makefile aircraft_fo_pars.f90 $(DEF_PATH)/vlidort_pars.f90
+$(OBJ_PATH)/aircraft_fo.o: $(FO_SHARED_OBJECTS)
+$(OBJ_PATH)/DRIVER.o: $(OBJ_PATH)/sparse_aircraft.o $(OBJ_PATH)/aircraft_fo.o
+
+$(OBJ_PATH)/%.o: $(QS_PATH)/vqs_main/msseg/regular/%.f90 | $(MOD_PATH) $(OBJ_PATH)
+	$(FC) $(FFLAGS) $< -o $@
+
+$(OBJ_PATH)/%.o: $(QS_PATH)/vqs_main/msseg/linearized/%.f90 | $(MOD_PATH) $(OBJ_PATH)
+	$(FC) $(FFLAGS) $< -o $@
+
+$(MS_SHARED_OBJECTS): makefile aircraft_ms_pars.f90 $(wildcard $(DEF_PATH)/*.f90) \
+	$(QS_PATH)/vqs_main/msseg/regular/MSSeg_HPTypes.f90 \
+	$(QS_PATH)/vqs_main/msseg/linearized/MSSeg_L_HPTypes.f90
+$(OBJ_PATH)/aircraft_ms_sources.o: $(OBJ_PATH)/aircraft_chord_quadrature.o
+$(OBJ_PATH)/sparse_aircraft.o: $(MS_SHARED_OBJECTS)
 
 clean:
 	powershell -NoProfile -Command "Remove-Item -Force -ErrorAction SilentlyContinue -Path '*.o','*.mod','*.log','*.exe','*~','$(OBJ_FILES)','$(MOD_FILES)'"
